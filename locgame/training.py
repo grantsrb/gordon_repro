@@ -14,7 +14,7 @@ import psutil
 import json
 import torch.multiprocessing as mp
 import ml_utils.save_io as io
-from ml_utils.training import get_exp_num, record_session, get_save_folder
+from ml_utils.training import get_exp_num, record_session, get_save_folder,get_resume_checkpt
 from ml_utils.utils import try_key
 import locgame.models as models
 import locgame.environments as environments
@@ -30,8 +30,10 @@ def train(hyps, verbose=True):
         contains all relavent hyperparameters
     """
     hyps['main_path'] = try_key(hyps,'main_path',"./")
-    hyps['exp_num'] = get_exp_num(hyps['main_path'], hyps['exp_name'])
-    hyps['save_folder'] = get_save_folder(hyps)
+    checkpt = get_resume_checkpt(hyps)
+    if checkpt is None:
+        hyps['exp_num']=get_exp_num(hyps['main_path'], hyps['exp_name'])
+        hyps['save_folder'] = get_save_folder(hyps)
     if not os.path.exists(hyps['save_folder']):
         os.mkdir(hyps['save_folder'])
     # Set manual seed
@@ -60,18 +62,15 @@ def train(hyps, verbose=True):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=hyps['lr'],
                                            weight_decay=hyps['l2'])
-    init_checkpt = try_key(hyps,"init_checkpt", None)
-    if init_checkpt is not None and init_checkpt != "":
+    if checkpt is not None:
         if verbose:
-            print("Loading state dicts from", init_checkpt)
-        checkpt = io.load_checkpoint(init_checkpt)
+            print("Loading state dicts from", checkpt['save_folder'])
         model.load_state_dict(checkpt["state_dict"])
         optimizer.load_state_dict(checkpt["optim_dict"])
     lossfxn = getattr(nn,try_key(hyps,'lossfxn',"MSELoss"))()
     scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5,
                                                     patience=6,
                                                     verbose=True)
-
     if verbose:
         print("Beginning training for {}".format(hyps['save_folder']))
         print("Img Shape:", hyps['img_shape'])
@@ -79,9 +78,8 @@ def train(hyps, verbose=True):
 
     if hyps['exp_name'] == "test":
         hyps['n_epochs'] = 2
-    epoch = -1
+    epoch = -1 if checkpt is None else checkpt['epoch']
 
-    # TODO: add rew alpha to hyps json
     alpha = try_key(hyps,'rew_alpha',.7)
     print()
     while epoch < hyps['n_epochs']:
@@ -89,6 +87,7 @@ def train(hyps, verbose=True):
         print("Epoch:{} | Model:{}".format(epoch, hyps['save_folder']))
         starttime = time.time()
         avg_loss = 0
+        avg_rew = 0
         avg_pred_loss = 0
         avg_rew_loss = 0
         model.train()
@@ -138,9 +137,11 @@ def train(hyps, verbose=True):
             avg_loss += loss.item()
             avg_pred_loss += pred_loss.item()
             avg_rew_loss += rew_loss.item()
-            s = "Loss:{:.5f} | Loc:{:.5f} | Rew:{:.5f} | {:.0f}%"
-            s = s.format(loss.item(), pred_loss.item(),
-                                      rew_loss.item(),
+
+            rew_mean = rews.mean().item()
+            avg_rew += rew_mean
+            s = "Loc:{:.5f} | RewLoss:{:.5f} | Rew:{:.5f} | {:.0f}%"
+            s = s.format(pred_loss.item(), rew_loss.item(), rew_mean,
                                       rollout/hyps['n_rollouts']*100)
             print(s, end=len(s)*" " + "\r")
             if hyps['exp_name'] == "test" and rollout>3: break
@@ -148,12 +149,35 @@ def train(hyps, verbose=True):
         train_avg_loss = avg_loss / hyps['n_rollouts']
         train_pred_loss = avg_pred_loss / hyps['n_rollouts']
         train_rew_loss = avg_rew_loss / hyps['n_rollouts']
+        train_avg_rew = avg_rew / hyps['n_rollouts']
 
-        s = "Train - Loss:{:.5f} | Loc:{:.5f} | Rew:{:.5f}\n"
+        s = "Train - Loss:{:.5f} | Loc:{:.5f} | RewLoss:{:.5f} | Rew:{:.5f}\n"
         stats_string = s.format(train_avg_loss, train_pred_loss,
-                                                train_rew_loss)
+                                                train_rew_loss,
+                                                train_avg_rew)
         scheduler.step(train_avg_loss)
 
+        print("Evaluating")
+        done = True
+        model.eval()
+        sum_rew = 0
+        n_eps = -1
+        n_loops = 0
+        sleep_time = 1
+        with torch.no_grad():
+            while n_eps < 5:
+                if done:
+                    obs,_ = env.reset()
+                    model.reset_h()
+                    time.sleep(sleep_time)
+                    n_eps += 1
+                pred,rew_pred = model(obs[None].to(DEVICE))
+                obs,_,rew,done,_ = env.step(pred)
+                sum_rew += rew
+                time.sleep(sleep_time)
+                n_loops += 1
+        val_rew = sum_rew/n_loops
+        stats_string += "Evaluation Avg Rew: {:.5f}\n".format(val_rew)
 
         optimizer.zero_grad()
         save_dict = {
@@ -162,6 +186,8 @@ def train(hyps, verbose=True):
             "train_loss":train_avg_loss,
             "train_pred_loss":train_pred_loss,
             "train_rew_loss":train_rew_loss,
+            "train_rew":train_avg_rew,
+            "val_rew":val_rew,
             "state_dict":model.state_dict(),
             "optim_dict":optimizer.state_dict(),
         }
@@ -180,5 +206,7 @@ def train(hyps, verbose=True):
     del save_dict['optim_dict']
     del save_dict['hyps']
     save_dict['save_folder'] = hyps['save_folder']
+    env.close()
+    del env
     return save_dict
 

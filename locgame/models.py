@@ -5,7 +5,9 @@ import numpy as np
 import time
 import os
 import torch.nn.functional as F
-from crab.custom_modules import *
+from transformer.custom_modules import *
+from transformer.models import *
+from ml_utils.utils import update_shape
 
 d = {i:"cuda:"+str(i) for i in range(torch.cuda.device_count())}
 DEVICE_DICT = {-1:"cpu", **d}

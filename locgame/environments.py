@@ -15,7 +15,8 @@ from mlagents_envs.side_channel.environment_parameters_channel import Environmen
 
 class UnityGymEnv:
     def __init__(self, env_name, prep_fxn, seed=int(time.time()),
-                                               **kwargs):
+                                           worker_id=None,
+                                           **kwargs):
         """
         env_name: str
             the name of the environment
@@ -24,10 +25,14 @@ class UnityGymEnv:
             of the observations
         seed: int
             the random seed for the environment
+        worker_id: int
+            must specify a unique worker id for each unity process
+            on this machine
         """
         self.env_name = env_name
         self.prep_fxn = globals()[prep_fxn]
         self.seed = seed
+        self.worker_id = worker_id
 
         self.env = self.make_unity_env(env_name, seed=self.seed,
                                             **kwargs)
@@ -37,8 +42,9 @@ class UnityGymEnv:
         # Discrete action spaces are not yet implemented
         self.is_discrete = False
 
-    def make_unity_env(self, env_name, float_params=None, time_scale=1,
+    def make_unity_env(self, env_name, float_params=dict(), time_scale=1,
                                                       seed=time.time(),
+                                                      worker_id=None,
                                                       **kwargs):
         """
         creates a gym environment from a unity game
@@ -55,16 +61,22 @@ class UnityGymEnv:
             but I'm not sure
         seed: int
             the seed for randomness
+        worker_id: int
+            must specify a unique worker id for each unity process
+            on this machine
         """
+        if float_params is None: float_params = dict()
         path = os.path.expanduser(env_name)
         channel = EngineConfigurationChannel()
         env_channel = EnvironmentParametersChannel()
-        env = UnityEnvironment(file_name=path,
-                               side_channels=[channel,env_channel],
-                               seed=seed)
         channel.set_configuration_parameters(time_scale = 1)
         for k,v in float_params.items():
             env_channel.set_float_parameter(k, v)
+        if worker_id is None: worker_id = int(time.time())%500
+        env = UnityEnvironment(file_name=path,
+                               side_channels=[channel,env_channel],
+                               worker_id=worker_id,
+                               seed=seed)
         env = UnityToGymWrapper(env, allow_multiple_obs=True)
         return env
 
@@ -113,6 +125,9 @@ class UnityGymEnv:
         else:
             preds = preds.squeeze().cpu().data.numpy()
             return preds
+    
+    def close(self):
+        self.env.close()
 
 def pong_prep(pic):
     pic = pic[35:195] # crop

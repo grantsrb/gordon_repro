@@ -8,31 +8,30 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
-game_path = os.path.expanduser("~/countsort_data/LocationGameLinux.x86_64")
+game_path = os.path.expanduser("../Builds/LocationGameMac")
 seed = 0
 channel = EngineConfigurationChannel()
 env_channel = EnvironmentParametersChannel()
 env = UnityEnvironment(file_name=game_path, side_channels=[channel,env_channel], seed=seed)
 channel.set_configuration_parameters(time_scale = 1)
 env_channel.set_float_parameter("validation", 0)
-env_channel.set_float_parameter("egoCentered", 0)
+env_channel.set_float_parameter("egoCentered", 1)
 
 env = UnityToGymWrapper(env, allow_multiple_obs=True)
-print("wrapped env")
 obs = env.reset()
-print("entering loop")
+print("initl targ:", obs[1])
 done = False
 while True:
     print("stepping")
-    x,z = np.random.random()*2-1, np.random.random()*2-1
+    x,z = [float(y.strip()) for y in str(input("action: ")).split(",")]
     # The obs is a list of length 2 in which the first element is the image and the second is the goal coordinate
     # Reward in this case is the difference between the action location and the nearest object to the action location
     obs, rew, done, _ = env.step([x,z])
-    print(obs[0])
-    print(obs[1])
+    print("targ:", obs[1])
     print("rew:", rew)
     print("done:", done)
-    time.sleep(1)
+    plt.imshow(obs[0])
+    plt.show()
     if done:
         obs = env.reset()
         print("resetting")

@@ -22,6 +22,7 @@ checkpt = io.load_checkpoint(sys.argv[1])
 hyps = checkpt['hyps']
 
 print("Making Env")
+hyps['seed'] = int(time.time())
 env = environments.UnityGymEnv(**hyps)
 
 print("Making model")

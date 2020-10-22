@@ -107,6 +107,7 @@ class UnityGymEnv:
         action = self.get_action(pred)
         obs,rew,done,info = self.env.step(action)
         obs,targ = self.prep_obs(obs)
+        targ = np.clip(targ,-1,1)
         return obs, targ, rew, done, info
 
     def get_action(self, preds):

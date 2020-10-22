@@ -8,7 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
-game_path = os.path.expanduser("../Builds/LocationGameMac")
+game_path = os.path.expanduser("~/countsort_data/LocationGameLinux.x86_64")
 seed = 0
 channel = EngineConfigurationChannel()
 env_channel = EnvironmentParametersChannel()
@@ -20,6 +20,8 @@ env_channel.set_float_parameter("egoCentered", 1)
 env = UnityToGymWrapper(env, allow_multiple_obs=True)
 obs = env.reset()
 print("initl targ:", obs[1])
+plt.imshow(obs[0])
+plt.show()
 done = False
 while True:
     print("stepping")
@@ -35,5 +37,7 @@ while True:
     if done:
         obs = env.reset()
         print("resetting")
+        plt.imshow(obs[0])
+        plt.show()
 
 

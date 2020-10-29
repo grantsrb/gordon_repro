@@ -11,6 +11,9 @@ import sys
 
 if __name__ == "__main__":
     model_folders = sys.argv[1:]
+    if not mlio.is_model_folder(model_folders[0]):
+        model_folders = mlio.get_model_folders(model_folders[0],True)
+    print("Model Folders:", model_folders)
     for model_folder in model_folders:
         checkpts = mlio.get_checkpoints(model_folder)
         table = mlanl.get_table(mlio.load_checkpoint(checkpts[0]))

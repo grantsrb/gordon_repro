@@ -30,7 +30,7 @@ def train(hyps, verbose=True):
         contains all relavent hyperparameters
     """
     hyps['main_path'] = try_key(hyps,'main_path',"./")
-    checkpt = get_resume_checkpt(hyps)
+    checkpt,hyps = get_resume_checkpt(hyps)
     if checkpt is None:
         hyps['exp_num']=get_exp_num(hyps['main_path'], hyps['exp_name'])
         hyps['save_folder'] = get_save_folder(hyps)
@@ -151,7 +151,8 @@ def train(hyps, verbose=True):
         train_rew_loss = avg_rew_loss / hyps['n_rollouts']
         train_avg_rew = avg_rew / hyps['n_rollouts']
 
-        s = "Train - Loss:{:.5f} | Loc:{:.5f} | RewLoss:{:.5f} | Rew:{:.5f}\n"
+        s = "Train - Loss:{:.5f} | Loc:{:.5f} | "
+        s += "RewLoss:{:.5f} | Rew:{:.5f}\n"
         stats_string = s.format(train_avg_loss, train_pred_loss,
                                                 train_rew_loss,
                                                 train_avg_rew)

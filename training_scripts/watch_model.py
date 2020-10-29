@@ -44,8 +44,10 @@ with torch.no_grad():
             if n_loops > 0:
                 print("Running Mean Rew:", sum_rew/n_loops)
         pred,rew_pred = model(obs[None].to(DEVICE))
-        obs,_,rew,done,_ = env.step(pred)
+        obs,targ,rew,done,_ = env.step(pred)
         sum_rew += rew
+        print("targ:", targ.squeeze())
+        print("pred:", pred.squeeze().cpu().data.numpy())
         plt.imshow(obs.squeeze().permute(1,2,0).data.numpy()/3)
         plt.show()
         n_loops += 1

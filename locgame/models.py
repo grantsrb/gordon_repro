@@ -15,116 +15,66 @@ DEVICE_DICT = {-1:"cpu", **d}
 class LocatorBase(TransformerBase):
     def __init__(self,*args,**kwargs):
         super().__init__(*args,**kwargs)
-    #def __init__(self, seq_len=None, n_vocab=None,
-    #                                 emb_size=512,
-    #                                 enc_slen=None,
-    #                                 dec_slen=None,
-    #                                 attn_size=64,
-    #                                 n_heads=8,
-    #                                 enc_layers=3,
-    #                                 dec_layers=3,
-    #                                 enc_mask=False,
-    #                                 class_h_size=4000,
-    #                                 class_bnorm=True,
-    #                                 class_drop_p=0,
-    #                                 act_fxn="ReLU",
-    #                                 enc_drop_p=0,
-    #                                 dec_drop_p=0,
-    #                                 collapse_drop_p=0,
-    #                                 expand_drop_p=0,
-    #                                 ordered_preds=False,
-    #                                 gen_decs=False,
-    #                                 init_decs=False,
-    #                                 idx_inputs=True,
-    #                                 idx_outputs=True,
-    #                                 prob_embs=False,
-    #                                 prob_attn=False,
-    #                                 mask_idx=0,
-    #                                 start_idx=None,
-    #                                 stop_idx=None,
-    #                                 multi_init=False,
-    #                                 **kwargs):
-    #    """
-    #    seq_len: int or None
-    #        the maximum length of the sequences to be analyzed. If None,
-    #        dec_slen and enc_slen must not be None
-    #    enc_slen: int or None
-    #        the length of the sequences to be encoded
-    #    dec_slen: int or None
-    #        the length of the sequences to be decoded
-    #    n_vocab: int
-    #        the number of words in the vocabulary
-    #    emb_size: int
-    #        the size of the embeddings
-    #    attn_size: int
-    #        the size of the projected spaces in the attention layers
-    #    n_heads: int
-    #        the number of attention heads
-    #    enc_layers: int
-    #        the number of encoding layers
-    #    dec_layers: int
-    #        the number of decoding layers
-    #    enc_mask: bool
-    #        if true, encoder uses a mask
-    #    class_h_size: int
-    #        the size of the hidden layers in the classifier
-    #    class_bnorm: bool
-    #        if true, the classifier uses batchnorm
-    #    class_drop_p: float
-    #        the dropout probability for the classifier
-    #    act_fxn: str
-    #        the activation function to be used in the MLPs
-    #    collapse_type: str
-    #        the type of collapsing module for the embedding encoding
-    #    expand_type: str
-    #        the type of expanding module for the embedding encoding
-    #    enc_drop_ps: float or list of floats
-    #        the dropout probability for each encoding layer
-    #    dec_drop_ps: float or list of floats
-    #        the dropout probability for each decoding layer
-    #    collapse_drop_p: float
-    #        the dropout probability for the collapsing layer
-    #    expand_drop_p: float
-    #        the dropout probability for the expanding layer
-    #    ordered_preds: bool
-    #        if true, the decoder will mask the predicted sequence so
-    #        that the attention modules will not see the tokens ahead
-    #        located further along in the sequence.
-    #    gen_decs: bool
-    #        if true, decodings are generated individually and used
-    #        as the inputs for later decodings. (stands for generate
-    #        decodings). This ensures earlier attention values are
-    #        completely unaffected by later inputs.
-    #    init_decs: bool
-    #        if true, an initialization decoding vector is learned as
-    #        the initial input to the decoder.
-    #    idx_inputs: bool
-    #        if true, the inputs are integer (long) indexes that require
-    #        an embedding layer. Otherwise it is assumed that the inputs
-    #        are feature vectors that do not require an embedding layer
-    #    idx_outputs: bool
-    #        if true, the output sequence (y) is integer (long) indexes
-    #        that require an embedding layer. Otherwise it is assumed
-    #        that the outputs are feature vectors that do not require
-    #        an embedding layer
-    #    prob_embs: bool
-    #        if true, all embedding vectors are treated as parameter
-    #        vectors for gaussian distributions before being fed into
-    #        the transformer architecture
-    #    prob_attn: bool
-    #        if true, the queries and keys are projected into a mu and
-    #        sigma vector and sampled from a gaussian distribution
-    #        before the attn mechanism
-    #    mask_idx: int
-    #        the numeric index of the mask token
-    #    start_idx: int
-    #        the numeric index of the start token
-    #    stop_idx: int
-    #        the numeric index of the stop token
-    #    multi_init: bool
-    #        if true, the initialization vector has a unique value for
-    #        each slot in the generated sequence
-    #    """
+
+class TransformerLocator(LocatorBase):
+    def __init__(self, cnn_type="SimpleCNN", **kwargs):
+        super().__init__(**kwargs)
+        self.cnn_type = cnn_type
+        self.cnn = globals()[self.cnn_type](**kwargs)
+        self.pos_encoder = PositionalEncoder(self.cnn.seq_len,
+                                             self.emb_size)
+        max_num_steps = 20
+        self.extractor = Decoder(max_num_steps,
+                                 emb_size=self.emb_size,
+                                 attn_size=self.attn_size,
+                                 n_layers=self.dec_layers,
+                                 n_heads=self.n_heads,
+                                 act_fxn=self.act_fxn,
+                                 use_mask=False,
+                                 init_decs=False,
+                                 prob_embs=self.prob_embs,
+                                 prob_attn=self.prob_attn)
+
+        # Learned initialization for memory transformer init vector
+        self.h_init = torch.randn(1,1,self.emb_size)
+        divisor = float(np.sqrt(self.emb_size))
+        self.h_init = nn.Parameter(self.h_init/divisor)
+
+        self.locator = nn.Sequential(
+            nn.LayerNorm(self.emb_size),
+            nn.Linear(self.emb_size, self.class_h_size),
+            globals()[self.act_fxn](),
+            nn.LayerNorm(self.class_h_size),
+            nn.Linear(self.class_h_size, 2),
+            nn.Tanh()
+        )
+        # Reward model
+        self.pavlov = nn.Sequential(
+            nn.LayerNorm(self.emb_size),
+            nn.Linear(self.emb_size, self.class_h_size),
+            globals()[self.act_fxn](),
+            nn.LayerNorm(self.class_h_size),
+            nn.Linear(self.class_h_size, 1)
+        )
+
+    def fresh_h(self, batch_size=1):
+        return self.h_init.repeat(batch_size,1,1)
+
+    def reset_h(self, batch_size=1):
+        self.h = self.fresh_h(batch_size)
+
+    def forward(self, x):
+        """
+        x: torch float tensor (B,C,H,W)
+        """
+        feats = self.cnn(x)
+        feats = self.pos_encoder(feats)
+        self.h = self.extractor(self.h, feats)
+        loc = self.locator(self.h[:,0])
+        rew = self.pavlov(self.h[:,0])
+        self.h = torch.cat([self.fresh_h(len(x)),self.h],axis=1)
+        return loc,rew
+
 
 class RNNLocator(LocatorBase):
     def __init__(self, cnn_type="SimpleCNN", **kwargs):
@@ -160,6 +110,7 @@ class RNNLocator(LocatorBase):
             nn.Linear(self.class_h_size, 2),
             nn.Tanh()
         )
+        # Reward model
         self.pavlov = nn.Sequential(
             nn.LayerNorm(self.emb_size),
             nn.Linear(self.emb_size, self.class_h_size),

@@ -16,6 +16,7 @@ from mlagents_envs.side_channel.environment_parameters_channel import Environmen
 class UnityGymEnv:
     def __init__(self, env_name, prep_fxn, seed=int(time.time()),
                                            worker_id=None,
+                                           float_params=dict(),
                                            **kwargs):
         """
         env_name: str
@@ -28,14 +29,21 @@ class UnityGymEnv:
         worker_id: int
             must specify a unique worker id for each unity process
             on this machine
+        float_params: dict or None
+            this should be a dict of argument settings for the unity
+            environment
+            keys: varies by environment
         """
         self.env_name = env_name
         self.prep_fxn = globals()[prep_fxn]
         self.seed = seed
         self.worker_id = worker_id
+        self.float_params = float_params
 
-        self.env = self.make_unity_env(env_name, seed=self.seed,
-                                            **kwargs)
+        self.env = self.make_unity_env(env_name,
+                                       seed=self.seed,
+                                       float_params=float_params,
+                                       **kwargs)
         obs,action_targ = self.reset()
         self.shape = obs.shape
         self.targ_shape = action_targ.shape

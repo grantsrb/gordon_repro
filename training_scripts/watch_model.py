@@ -20,6 +20,9 @@ $ python3 watch_model.py <path_to_model>
 
 checkpt = io.load_checkpoint(sys.argv[1])
 hyps = checkpt['hyps']
+if "absoluteCoords" not in hyps['float_params']:
+    params = hyps['float_params']
+    params['absoluteCoords'] = float(not params["egoCentered"])
 
 print("Making Env")
 hyps['seed'] = int(time.time())

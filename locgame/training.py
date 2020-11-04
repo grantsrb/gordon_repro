@@ -41,6 +41,11 @@ def train(hyps, verbose=True):
     torch.manual_seed(hyps['seed'])
     np.random.seed(hyps['seed'])
 
+    if "float_params" not in hyps:
+        keys = ["validation", "egoCentered", "absoluteCoords",
+                "smoothMovement", "restrictCamera"]
+        hyps['float_params'] = {k:try_key(hyps,k,0) for k in keys}
+
     model_class = hyps['model_class']
     hyps['n_loss_loops'] = try_key(hyps,'n_loss_loops',1)
 

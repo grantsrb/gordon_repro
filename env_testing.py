@@ -16,6 +16,7 @@ env = UnityEnvironment(file_name=game_path, side_channels=[channel,env_channel],
 channel.set_configuration_parameters(time_scale = 1)
 env_channel.set_float_parameter("validation", 0)
 env_channel.set_float_parameter("egoCentered", 1)
+env_channel.set_float_parameter("absoluteCoords", 0)
 
 env = UnityToGymWrapper(env, allow_multiple_obs=True)
 obs = env.reset()

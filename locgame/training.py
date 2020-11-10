@@ -30,7 +30,7 @@ def train(hyps, verbose=True):
         contains all relavent hyperparameters
     """
     hyps['main_path'] = try_key(hyps,'main_path',"./")
-    checkpt,hyps = get_resume_checkpt(hyps)
+    checkpt,hyps = get_resume_checkpt(hyps,verbose=verbose)
     if checkpt is None:
         hyps['exp_num']=get_exp_num(hyps['main_path'], hyps['exp_name'])
         hyps['save_folder'] = get_save_folder(hyps)
@@ -86,6 +86,7 @@ def train(hyps, verbose=True):
     epoch = -1 if checkpt is None else checkpt['epoch']
 
     alpha = try_key(hyps,'rew_alpha',.7)
+    obj_recog = try_key(hyps,'obj_recog',False)
     print()
     while epoch < hyps['n_epochs']:
         epoch += 1
@@ -95,6 +96,8 @@ def train(hyps, verbose=True):
         avg_rew = 0
         avg_pred_loss = 0
         avg_rew_loss = 0
+        avg_obj_loss = 0
+        avg_obj_acc = 0
         model.train()
         print("Training...")
         torch.cuda.empty_cache()
@@ -108,13 +111,19 @@ def train(hyps, verbose=True):
             targs = []
             preds = []
             rew_preds = []
+            color_preds = [] if try_key(hyps,'obj_recog',False) else None
+            shape_preds = [] if try_key(hyps,'obj_recog',False) else None
             done_preds = []
             rews  = []
             dones = []
             while len(rews) < hyps['batch_size']:
-                pred,rew_pred = model(obs[None].to(DEVICE))
+                tup = model(obs[None].to(DEVICE))
+                pred,rew_pred,color_pred,shape_pred = tup
                 preds.append(pred)
                 rew_preds.append(rew_pred)
+                if obj_recog:
+                    color_preds.append(color_pred)
+                    shape_preds.append(shape_pred)
                 obs,targ,rew,done,_ = env.step(pred)
                 rews.append(rew)
                 dones.append(done)
@@ -125,13 +134,31 @@ def train(hyps, verbose=True):
                 obsrs.append(obs)
             # Calc Loss
             preds = torch.stack(preds).squeeze()
-            targs = torch.stack(targs)[:,:2]
+            targs = torch.stack(targs)
+            targs,obj_targs = targs[:,:2],targs[:,2:]
             pred_loss = lossfxn(preds,targs.to(DEVICE))
             rew_preds = torch.stack(rew_preds)
             rews = torch.FloatTensor(rews)
             rew_loss = lossfxn(rew_preds.squeeze(),rews.to(DEVICE))
+            obj_loss = torch.zeros(1).to(DEVICE)
+            obj_acc = 0
+            if obj_recog:
+                obj_targs = obj_targs.long().to(DEVICE)
+                color_preds = torch.stack(color_preds).squeeze()
+                color_loss = F.cross_entropy(color_preds,
+                                             obj_targs[:,:1])
+                shape_preds = torch.stack(color_preds).squeeze()
+                shape_loss = F.cross_entropy(shape_preds,
+                                             obj_targs[:,1:])
+                obj_loss = color_loss + shape_loss
+                with torch.no_grad():
+                    maxes = torch.argmax(color_preds,dim=-1)
+                    color_acc = (maxes==obj_targs[:,0]).float().mean()
+                    maxes = torch.argmax(shape_preds,dim=-1)
+                    shape_acc = (maxes==obj_targs[:,1]).float().mean()
+                    obj_acc = ((color_acc + shape_acc)/2).item()
 
-            loss = alpha*pred_loss + (1-alpha)*rew_loss
+            loss = alpha*(pred_loss+obj_loss) + (1-alpha)*rew_loss
             loss = loss / hyps['n_loss_loops']
             loss.backward()
 
@@ -142,25 +169,32 @@ def train(hyps, verbose=True):
             avg_loss += loss.item()
             avg_pred_loss += pred_loss.item()
             avg_rew_loss += rew_loss.item()
+            avg_obj_loss += obj_loss.item()
+            avg_obj_acc += obj_acc
 
             rew_mean = rews.mean().item()
             avg_rew += rew_mean
-            s = "Loc:{:.5f} | RewLoss:{:.5f} | Rew:{:.5f} | {:.0f}%"
-            s = s.format(pred_loss.item(), rew_loss.item(), rew_mean,
-                                      rollout/hyps['n_rollouts']*100)
+            s = "Loc:{:.5f} | RewLoss:{:.5f} | Obj:{:.5f} | {:.0f}%"
+            s=s.format(pred_loss.item(),rew_loss.item(),obj_loss.item(),
+                                         rollout/hyps['n_rollouts']*100)
             print(s, end=len(s)*" " + "\r")
-            if hyps['exp_name'] == "test" and rollout>3: break
+            if hyps['exp_name'] == "test" and rollout>=3: break
         print()
         train_avg_loss = avg_loss / hyps['n_rollouts']
         train_pred_loss = avg_pred_loss / hyps['n_rollouts']
         train_rew_loss = avg_rew_loss / hyps['n_rollouts']
+        train_obj_loss = avg_obj_loss / hyps['n_rollouts']
+        train_obj_acc = avg_obj_acc / hyps['n_rollouts']
         train_avg_rew = avg_rew / hyps['n_rollouts']
 
         s = "Train - Loss:{:.5f} | Loc:{:.5f} | "
         s += "RewLoss:{:.5f} | Rew:{:.5f}\n"
+        s += "Obj Loss:{:.5f} | Obj Acc:{:.5f}\n"
         stats_string = s.format(train_avg_loss, train_pred_loss,
                                                 train_rew_loss,
-                                                train_avg_rew)
+                                                train_avg_rew,
+                                                train_obj_loss,
+                                                train_obj_acc)
         scheduler.step(train_avg_loss)
 
         print("Evaluating")
@@ -177,7 +211,7 @@ def train(hyps, verbose=True):
                     model.reset_h()
                     time.sleep(sleep_time)
                     n_eps += 1
-                pred,rew_pred = model(obs[None].to(DEVICE))
+                pred,rew_pred,_,_ = model(obs[None].to(DEVICE))
                 obs,_,rew,done,_ = env.step(pred)
                 sum_rew += rew
                 time.sleep(sleep_time)
@@ -192,6 +226,8 @@ def train(hyps, verbose=True):
             "train_loss":train_avg_loss,
             "train_pred_loss":train_pred_loss,
             "train_rew_loss":train_rew_loss,
+            "train_obj_loss":train_obj_loss,
+            "train_obj_acc":train_obj_acc,
             "train_rew":train_avg_rew,
             "val_rew":val_rew,
             "state_dict":model.state_dict(),
@@ -200,7 +236,7 @@ def train(hyps, verbose=True):
         save_name = "checkpt"
         save_name = os.path.join(hyps['save_folder'],save_name)
         io.save_checkpt(save_dict, save_name, epoch, ext=".pt",
-                                del_prev_sd=hyps['del_prev_sd'])
+                                   del_prev_sd=hyps['del_prev_sd'])
         stats_string += "Exec time: {}\n".format(time.time()-starttime)
         print(stats_string)
         s = "Epoch:{} | Model:{}\n".format(epoch, hyps['save_folder'])

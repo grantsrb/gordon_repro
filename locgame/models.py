@@ -12,9 +12,13 @@ from ml_utils.utils import update_shape
 d = {i:"cuda:"+str(i) for i in range(torch.cuda.device_count())}
 DEVICE_DICT = {-1:"cpu", **d}
 
+N_COLORS = 5
+N_SHAPES = 5
+
 class LocatorBase(TransformerBase):
-    def __init__(self,*args,**kwargs):
+    def __init__(self,obj_recog=False,*args,**kwargs):
         super().__init__(*args,**kwargs)
+        self.obj_recog = obj_recog
 
 class TransformerLocator(LocatorBase):
     def __init__(self, cnn_type="SimpleCNN", **kwargs):
@@ -56,6 +60,22 @@ class TransformerLocator(LocatorBase):
             nn.LayerNorm(self.class_h_size),
             nn.Linear(self.class_h_size, 1)
         )
+        # Obj recognition model
+        if self.obj_recog:
+            self.color = nn.Sequential(
+                nn.LayerNorm(self.emb_size),
+                nn.Linear(self.emb_size, self.class_h_size),
+                globals()[self.act_fxn](),
+                nn.LayerNorm(self.class_h_size),
+                nn.Linear(self.class_h_size, N_COLORS)
+            )
+            self.shape = nn.Sequential(
+                nn.LayerNorm(self.emb_size),
+                nn.Linear(self.emb_size, self.class_h_size),
+                globals()[self.act_fxn](),
+                nn.LayerNorm(self.class_h_size),
+                nn.Linear(self.class_h_size, N_SHAPES)
+            )
 
     def fresh_h(self, batch_size=1):
         return self.h_init.repeat(batch_size,1,1)
@@ -72,9 +92,13 @@ class TransformerLocator(LocatorBase):
         self.h = self.extractor(self.h, feats)
         loc = self.locator(self.h[:,0])
         rew = self.pavlov(self.h[:,0])
+        if self.obj_recog:
+            color = self.color(self.h[:,0])
+            shape = self.shape(self.h[:,0])
+        else:
+            color,shape = None,None
         self.h = torch.cat([self.fresh_h(len(x)),self.h],axis=1)
-        return loc,rew
-
+        return loc,rew,color,shape
 
 class RNNLocator(LocatorBase):
     def __init__(self, cnn_type="SimpleCNN", **kwargs):
@@ -118,6 +142,22 @@ class RNNLocator(LocatorBase):
             nn.LayerNorm(self.class_h_size),
             nn.Linear(self.class_h_size, 1)
         )
+        # Obj recognition model
+        if self.obj_recog:
+            self.color = nn.Sequential(
+                nn.LayerNorm(self.emb_size),
+                nn.Linear(self.emb_size, self.class_h_size),
+                globals()[self.act_fxn](),
+                nn.LayerNorm(self.class_h_size),
+                nn.Linear(self.class_h_size, N_COLORS)
+            )
+            self.shape = nn.Sequential(
+                nn.LayerNorm(self.emb_size),
+                nn.Linear(self.emb_size, self.class_h_size),
+                globals()[self.act_fxn](),
+                nn.LayerNorm(self.class_h_size),
+                nn.Linear(self.class_h_size, N_SHAPES)
+            )
 
     def reset_h(self, batch_size=1):
         self.h = self.h_init.repeat(batch_size,1)
@@ -132,7 +172,12 @@ class RNNLocator(LocatorBase):
         self.h = self.rnn(feat.mean(1),self.h)
         loc = self.locator(self.h)
         rew = self.pavlov(self.h)
-        return loc,rew
+        if self.obj_recog:
+            color = self.color(self.h)
+            shape = self.shape(self.h)
+        else:
+            color,shape = None,None
+        return loc,rew,color,shape
 
 class CNNBase(nn.Module):
     def __init__(self, img_shape=(3,84,84), act_fxn="ReLU",

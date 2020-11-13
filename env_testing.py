@@ -3,24 +3,49 @@ from mlagents_envs.environment import UnityEnvironment
 from gym_unity.envs import UnityToGymWrapper
 from mlagents_envs.side_channel.engine_configuration_channel import EngineConfigurationChannel
 from mlagents_envs.side_channel.environment_parameters_channel import EnvironmentParametersChannel
+import locgame.environments as environments
+import locgame.save_io as io
 import h5py as h5
 import numpy as np
+import torch
 import matplotlib.pyplot as plt
+import matplotlib
 import os
+import sys
 
-game_path = os.path.expanduser("~/countsort_data/LocationGameLinux.x86_64")
-seed = 0
+if len(sys.argv) > 1:
+    checkpt = io.load_checkpoint(sys.argv[1])
+    hyps = checkpt['hyps']
+    params = hyps['float_params']
+    if "absoluteCoords" not in hyps['float_params']:
+        params['absoluteCoords'] = float(not params["egoCentered"])
+    seed = hyps['seed']
+else:
+    params = {"validation": 0,
+              "egoCentered": 1,
+              "absoluteCoords": 0,
+              "smoothMovement": 0,
+              "restrictCamera": 0}
+    seed = 0
+
+print("Seed:", seed)
+print("Params:", params)
+torch.manual_seed(seed)
+np.random.seed(seed)
+
+game_path = os.path.expanduser("~/locgame/LocationGameLinux.x86_64")
 channel = EngineConfigurationChannel()
 env_channel = EnvironmentParametersChannel()
-env = UnityEnvironment(file_name=game_path, side_channels=[channel,env_channel], seed=seed)
+env = UnityEnvironment(file_name=game_path,
+                       side_channels=[channel,env_channel],
+                       seed=seed)
 channel.set_configuration_parameters(time_scale = 1)
-env_channel.set_float_parameter("validation", 0)
-env_channel.set_float_parameter("egoCentered", 1)
-env_channel.set_float_parameter("absoluteCoords", 0)
-
+for k,v in params.items():
+    env_channel.set_float_parameter(k, v)
 env = UnityToGymWrapper(env, allow_multiple_obs=True)
+
+matplotlib.use("tkagg")
 obs = env.reset()
-print("initl targ:", obs[1])
 plt.imshow(obs[0])
 plt.show()
 done = False

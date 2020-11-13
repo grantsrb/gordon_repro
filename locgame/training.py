@@ -42,10 +42,13 @@ def train(hyps, verbose=True):
     np.random.seed(hyps['seed'])
 
     if "float_params" not in hyps:
-        keys = ["validation", "egoCentered", "absoluteCoords",
-                "smoothMovement", "restrictCamera"]
+        keys = hyps['game_keys']
         hyps['float_params'] = {k:try_key(hyps,k,0) for k in keys}
+        if "minObjLoc" not in hyps:
+            hyps['float_params']["minObjLoc"] = 0.27
+            hyps['float_params']["maxObjLoc"] = 0.73
 
+    print("Float Params:", hyps['float_params'])
     model_class = hyps['model_class']
     hyps['n_loss_loops'] = try_key(hyps,'n_loss_loops',1)
 
@@ -146,10 +149,10 @@ def train(hyps, verbose=True):
                 obj_targs = obj_targs.long().to(DEVICE)
                 color_preds = torch.stack(color_preds).squeeze()
                 color_loss = F.cross_entropy(color_preds,
-                                             obj_targs[:,:1])
-                shape_preds = torch.stack(color_preds).squeeze()
+                                             obj_targs[:,0])
+                shape_preds = torch.stack(shape_preds).squeeze()
                 shape_loss = F.cross_entropy(shape_preds,
-                                             obj_targs[:,1:])
+                                             obj_targs[:,1])
                 obj_loss = color_loss + shape_loss
                 with torch.no_grad():
                     maxes = torch.argmax(color_preds,dim=-1)

@@ -21,6 +21,7 @@ if __name__ == "__main__":
     print("Model Folders:", model_folders)
     for model_folder in model_folders:
         checkpts = mlio.get_checkpoints(model_folder)
+        if len(checkpts) == 0: continue
         table = mlanl.get_table(mlio.load_checkpoint(checkpts[0]))
         for checkpt in checkpts:
             chkpt = mlio.load_checkpoint(checkpt)

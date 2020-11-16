@@ -30,7 +30,7 @@ def train(hyps, verbose=True):
         contains all relavent hyperparameters
     """
     hyps['main_path'] = try_key(hyps,'main_path',"./")
-    checkpt,hyps = get_resume_checkpt(hyps,verbose=verbose)
+    checkpt,hyps = get_resume_checkpt(hyps,verbose=verbose) #incrs seed
     if checkpt is None:
         hyps['exp_num']=get_exp_num(hyps['main_path'], hyps['exp_name'])
         hyps['save_folder'] = get_save_folder(hyps)
@@ -72,7 +72,7 @@ def train(hyps, verbose=True):
                                            weight_decay=hyps['l2'])
     if checkpt is not None:
         if verbose:
-            print("Loading state dicts from", checkpt['save_folder'])
+            print("Loading state dicts from", hyps['save_folder'])
         model.load_state_dict(checkpt["state_dict"])
         optimizer.load_state_dict(checkpt["optim_dict"])
     lossfxn = getattr(nn,try_key(hyps,'lossfxn',"MSELoss"))()
@@ -90,6 +90,7 @@ def train(hyps, verbose=True):
 
     alpha = try_key(hyps,'rew_alpha',.7)
     obj_recog = try_key(hyps,'obj_recog',False)
+    best_val_rew = -np.inf
     print()
     while epoch < hyps['n_epochs']:
         epoch += 1
@@ -108,14 +109,15 @@ def train(hyps, verbose=True):
         # Collect new rollouts
         done = False
         for rollout in range(hyps['n_rollouts']):
+            iter_start = time.time()
             obs,targ = env.reset()
             model.reset_h()
             obsrs = [obs]
             targs = []
             preds = []
             rew_preds = []
-            color_preds = [] if try_key(hyps,'obj_recog',False) else None
-            shape_preds = [] if try_key(hyps,'obj_recog',False) else None
+            color_preds=[] if try_key(hyps,'obj_recog',False) else None
+            shape_preds=[] if try_key(hyps,'obj_recog',False) else None
             done_preds = []
             rews  = []
             dones = []
@@ -177,9 +179,10 @@ def train(hyps, verbose=True):
 
             rew_mean = rews.mean().item()
             avg_rew += rew_mean
-            s = "Loc:{:.5f} | RewLoss:{:.5f} | Obj:{:.5f} | {:.0f}%"
+            s = "LocL:{:.5f} | RewL:{:.5f} | Obj:{:.5f} | {:.0f}% | t:{:.2f}"
             s=s.format(pred_loss.item(),rew_loss.item(),obj_loss.item(),
-                                         rollout/hyps['n_rollouts']*100)
+                                         rollout/hyps['n_rollouts']*100,
+                                         time.time()-iter_start)
             print(s, end=len(s)*" " + "\r")
             if hyps['exp_name'] == "test" and rollout>=3: break
         print()
@@ -239,7 +242,9 @@ def train(hyps, verbose=True):
         save_name = "checkpt"
         save_name = os.path.join(hyps['save_folder'],save_name)
         io.save_checkpt(save_dict, save_name, epoch, ext=".pt",
-                                   del_prev_sd=hyps['del_prev_sd'])
+                                   del_prev_sd=hyps['del_prev_sd'],
+                                   best=(val_rew>best_val_rew))
+        best_val_rew = max(val_rew, best_val_rew)
         stats_string += "Exec time: {}\n".format(time.time()-starttime)
         print(stats_string)
         s = "Epoch:{} | Model:{}\n".format(epoch, hyps['save_folder'])

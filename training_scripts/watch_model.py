@@ -18,7 +18,7 @@ To use this script, argue a model folder or checkpt to be examined
 $ python3 watch_model.py <path_to_model>
 """
 
-env_name = "~/loc_games/LocationGameLinux.x86_64"
+env_name = "~/loc_games/LocationGameLinux_1/LocationGameLinux.x86_64"
 
 checkpt = io.load_checkpoint(sys.argv[1])
 hyps = checkpt['hyps']
@@ -49,11 +49,16 @@ with torch.no_grad():
             plt.show()
             if n_loops > 0:
                 print("Running Mean Rew:", sum_rew/n_loops)
-        pred,rew_pred,_,_ = model(obs[None].to(DEVICE))
+        pred,rew_pred,color,shape = model(obs[None].to(DEVICE))
         obs,targ,rew,done,_ = env.step(pred)
         sum_rew += rew
+        if color is not None:
+            color = torch.argmax(color[0]).item()
+            shape = torch.argmax(shape[0]).item()
+        pred = pred.squeeze().cpu().data.tolist() + [color,shape]
         print("targ:", targ.squeeze())
-        print("pred:", pred.squeeze().cpu().data.numpy())
+        print("pred:", pred)
+        print()
         plt.imshow(obs.squeeze().permute(1,2,0).data.numpy()/3)
         plt.show()
         n_loops += 1

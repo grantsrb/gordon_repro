@@ -38,8 +38,10 @@ def train(hyps, verbose=True):
         os.mkdir(hyps['save_folder'])
     # Set manual seed
     hyps['seed'] = try_key(hyps,'seed', int(time.time()))
-    torch.manual_seed(hyps['seed'])
-    np.random.seed(hyps['seed'])
+    if "torch_seed" in hyps: torch.manual_seed(hyps['torch_seed'])
+    else: torch.manual_seed(hyps['seed'])
+    if "numpy_seed" in hyps: np.random.seed(hyps['numpy_seed'])
+    else: np.random.seed(hyps['seed'])
 
     if "float_params" not in hyps:
         keys = hyps['game_keys']
@@ -209,18 +211,15 @@ def train(hyps, verbose=True):
         sum_rew = 0
         n_eps = -1
         n_loops = 0
-        sleep_time = 1
         with torch.no_grad():
             while n_eps < 5:
                 if done:
                     obs,_ = env.reset()
                     model.reset_h()
-                    time.sleep(sleep_time)
                     n_eps += 1
                 pred,rew_pred,_,_ = model(obs[None].to(DEVICE))
                 obs,_,rew,done,_ = env.step(pred)
                 sum_rew += rew
-                time.sleep(sleep_time)
                 n_loops += 1
         val_rew = sum_rew/n_loops
         stats_string += "Evaluation Avg Rew: {:.5f}\n".format(val_rew)

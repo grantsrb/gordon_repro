@@ -79,6 +79,8 @@ class UnityGymEnv:
         env_channel = EnvironmentParametersChannel()
         channel.set_configuration_parameters(time_scale = 1)
         for k,v in float_params.items():
+            if k=="validation" and v>=1:
+                print("Game in validation mode")
             env_channel.set_float_parameter(k, v)
         if worker_id is None: worker_id = int(time.time())%500
         env = UnityEnvironment(file_name=path,

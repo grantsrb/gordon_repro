@@ -24,7 +24,7 @@ if torch.cuda.is_available():
 else:
     DEVICE = torch.device("cpu")
 
-def train(hyps, verbose=True):
+def train(_, hyps, verbose=True):
     """
     hyps: dict
         contains all relavent hyperparameters
@@ -57,7 +57,7 @@ def train(hyps, verbose=True):
     if verbose:
         print("Making Env(s)")
     hyps['n_runners'] = try_key(hyps,'n_runners',1)
-    env = environments.UnityGymEnv(**hyps)
+    env = environments.get_env(hyps)
 
     hyps["img_shape"] = env.shape
     hyps["targ_shape"] = env.targ_shape
@@ -120,6 +120,10 @@ def train(hyps, verbose=True):
             proc = mp.Process(target=runners[i].run, args=(model,True))
             procs.append(proc)
             proc.start()
+        if verbose:
+            print("Waiting for environments to load")
+        for i in range(len(runners)):
+            stop_q.get()
     else:
         runner.env = env
 
@@ -374,8 +378,9 @@ class Runner:
         self.lossfxn = getattr(nn,lossfxn_name)()
         if self.env is None:
             self.hyps['seed'] = self.hyps['seed'] + self.rank
-            self.env = environments.UnityGymEnv(**self.hyps)
+            self.env = environments.get_env(self.hyps)
             print("env made rank:", self.rank)
+            self.stop_q.put(self.rank)
         if multi_proc:
             while True:
                 idx = self.gate_q.get() # Opened from main process
@@ -410,6 +415,8 @@ class Runner:
         rews  = []
         dones = []
         alpha = try_key(hyps,'rew_alpha',.7)
+        # TODO: figure out way to store states and observations
+        # for faster training
         while len(rews) < n_tsteps:
             tup = self.model(obs[None].to(DEVICE))
             pred,rew_pred,color_pred,shape_pred = tup

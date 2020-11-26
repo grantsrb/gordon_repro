@@ -12,8 +12,8 @@ from ml_utils.utils import update_shape
 d = {i:"cuda:"+str(i) for i in range(torch.cuda.device_count())}
 DEVICE_DICT = {-1:"cpu", **d}
 
-N_COLORS = 5
-N_SHAPES = 5
+N_COLORS = 7
+N_SHAPES = 7
 
 class LocatorBase(TransformerBase):
     def __init__(self,obj_recog=False,*args,**kwargs):

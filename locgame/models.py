@@ -52,14 +52,6 @@ class TransformerLocator(LocatorBase):
             nn.Linear(self.class_h_size, 2),
             nn.Tanh()
         )
-        # Reward model
-        self.pavlov = nn.Sequential(
-            nn.LayerNorm(self.emb_size),
-            nn.Linear(self.emb_size, self.class_h_size),
-            globals()[self.act_fxn](),
-            nn.LayerNorm(self.class_h_size),
-            nn.Linear(self.class_h_size, 1)
-        )
         # Obj recognition model
         if self.obj_recog:
             self.color = nn.Sequential(
@@ -82,23 +74,25 @@ class TransformerLocator(LocatorBase):
 
     def reset_h(self, batch_size=1):
         self.h = self.fresh_h(batch_size)
+        return self.h
 
-    def forward(self, x):
+    def forward(self, x, h=None):
         """
         x: torch float tensor (B,C,H,W)
         """
+        if h is None:
+            h = self.h
         feats = self.cnn(x)
         feats = self.pos_encoder(feats)
-        self.h = self.extractor(self.h, feats)
-        loc = self.locator(self.h[:,0])
-        rew = self.pavlov(self.h[:,0])
+        h = self.extractor(h, feats)
+        loc = self.locator(h[:,0])
         if self.obj_recog:
-            color = self.color(self.h[:,0])
-            shape = self.shape(self.h[:,0])
+            color = self.color(h[:,0])
+            shape = self.shape(h[:,0])
         else:
             color,shape = None,None
-        self.h = torch.cat([self.fresh_h(len(x)),self.h],axis=1)
-        return loc,rew,color,shape
+        self.h = torch.cat([self.fresh_h(len(x)),h],axis=1)
+        return loc,color,shape
 
 class RNNLocator(LocatorBase):
     def __init__(self, cnn_type="SimpleCNN", **kwargs):
@@ -119,7 +113,8 @@ class RNNLocator(LocatorBase):
                                  prob_attn=self.prob_attn)
 
         # Learned initialization for rnn hidden vector
-        self.h_init = torch.randn(1,self.emb_size)
+        self.h_shape = (1,self.emb_size)
+        self.h_init = torch.randn(self.h_shape)
         divisor = float(np.sqrt(self.emb_size))
         self.h_init = nn.Parameter(self.h_init/divisor)
 
@@ -133,14 +128,6 @@ class RNNLocator(LocatorBase):
             nn.LayerNorm(self.class_h_size),
             nn.Linear(self.class_h_size, 2),
             nn.Tanh()
-        )
-        # Reward model
-        self.pavlov = nn.Sequential(
-            nn.LayerNorm(self.emb_size),
-            nn.Linear(self.emb_size, self.class_h_size),
-            globals()[self.act_fxn](),
-            nn.LayerNorm(self.class_h_size),
-            nn.Linear(self.class_h_size, 1)
         )
         # Obj recognition model
         if self.obj_recog:
@@ -161,23 +148,25 @@ class RNNLocator(LocatorBase):
 
     def reset_h(self, batch_size=1):
         self.h = self.h_init.repeat(batch_size,1)
+        return self.h
 
-    def forward(self, x):
+    def forward(self, x, h=None):
         """
         x: torch float tensor (B,C,H,W)
         """
+        if h is None:
+            h = self.h
         feats = self.cnn(x)
         feats = self.pos_encoder(feats)
-        feat = self.extractor(self.h.unsqueeze(1), feats)
-        self.h = self.rnn(feat.mean(1),self.h)
-        loc = self.locator(self.h)
-        rew = self.pavlov(self.h)
+        feat = self.extractor(h.unsqueeze(1), feats)
+        h = self.rnn(feat.mean(1),h)
+        loc = self.locator(h)
         if self.obj_recog:
-            color = self.color(self.h)
-            shape = self.shape(self.h)
+            color = self.color(h)
+            shape = self.shape(h)
         else:
             color,shape = None,None
-        return loc,rew,color,shape
+        return loc,color,shape
 
 class CNNBase(nn.Module):
     def __init__(self, img_shape=(3,84,84), act_fxn="ReLU",

@@ -74,7 +74,6 @@ def train(rank, hyps, verbose=True):
             print("Loading state dicts from", hyps['save_folder'])
         model.load_state_dict(checkpt["state_dict"])
         optimizer.load_state_dict(checkpt["optim_dict"])
-    lossfxn = getattr(nn,try_key(hyps,'lossfxn',"MSELoss"))()
     scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5,
                                                     patience=6,
                                                     verbose=True)
@@ -88,17 +87,16 @@ def train(rank, hyps, verbose=True):
     # The total number of steps included in the update
     hyps['batch_size'] = hyps['n_tsteps']*hyps['n_runs']
     shared_data = {
-            'rews': torch.zeros(hyps['n_runs']).share_memory_(),
-            'losses': torch.zeros(hyps['n_runs']).share_memory_(),
-            'loc_losses':torch.zeros(hyps['n_runs']).share_memory_(),
-            'rew_losses':torch.zeros(hyps['n_runs']).share_memory_(),
-            'obj_losses':torch.zeros(hyps['n_runs']).share_memory_(),
-            'color_losses':torch.zeros(hyps['n_runs']).share_memory_(),
-            'shape_losses':torch.zeros(hyps['n_runs']).share_memory_(),
-            'obj_accs':torch.zeros(hyps['n_runs']).share_memory_(),
-            'color_accs':torch.zeros(hyps['n_runs']).share_memory_(),
-            'shape_accs':torch.zeros(hyps['n_runs']).share_memory_(),
+            'rews': torch.zeros(hyps['batch_size']),
+            "hs":torch.zeros(hyps['batch_size'],model.h_shape[-1]),
+            "starts":torch.zeros(hyps['batch_size']).long(),
+            "dones":torch.zeros(hyps['batch_size']).long(),
+            "obsrs":torch.zeros(hyps['batch_size'],*env.shape),
+            "loc_targs":torch.zeros(hyps['batch_size'],2),
+            "obj_targs":torch.zeros(hyps['batch_size'],2).long()
             }
+    shared_data = {k:v.share_memory_().cuda() for k,v in\
+                                     shared_data.items()}
 
     gate_q = mp.Queue(hyps['n_runs'])
     stop_q = mp.Queue(hyps['n_runs'])
@@ -114,6 +112,10 @@ def train(rank, hyps, verbose=True):
                                            gate_q=gate_q,
                                            stop_q=stop_q)
         runners.append(runner)
+    val_runner = Runner(rank=0,hyps=hyps, shared_data=None,
+                                          gate_q=None,
+                                          stop_q=None)
+    val_runner.env = env
     if len(runners) > 1:
         procs = []
         for i in range(len(runners)):
@@ -148,7 +150,6 @@ def train(rank, hyps, verbose=True):
         avg_loss = 0
         avg_rew = 0
         avg_loc_loss = 0
-        avg_rew_loss = 0
         avg_obj_loss = 0
         avg_color_loss = 0
         avg_color_acc = 0
@@ -173,27 +174,51 @@ def train(rank, hyps, verbose=True):
             else:
                 runner.run(model,multi_proc=False)
 
-            avg_loss +=     shared_data['losses'].mean()
-            avg_rew +=      shared_data['rews'].mean()
-            avg_loc_loss += shared_data['loc_losses'].mean().item()
-            avg_rew_loss += shared_data['rew_losses'].mean().item()
+            # Collect data from runners
+            rews = shared_data['rews']
+            hs = shared_data['hs']
+            dones = shared_data['dones']
+            starts = shared_data['starts']
+            obsrs = shared_data['obsrs']
+            loc_targs = shared_data['loc_targs']
+            obj_targs = shared_data['obj_targs']
+            color_targs,shape_targs = obj_targs[:,0],obj_targs[:,1]
 
-            avg_obj_loss += shared_data['obj_losses'].mean().item()
-            avg_color_loss+= shared_data['color_losses'].mean().item()
-            avg_shape_loss+= shared_data['shape_losses'].mean().item()
-            avg_color_acc += shared_data['color_accs'].mean().item()
-            avg_shape_acc += shared_data['shape_accs'].mean().item()
-            avg_obj_acc   += shared_data['obj_accs'].mean().item()
+            # Make predictions
+            pred_tup = model(obsrs.cuda(), hs.cuda())
+            loc_preds,color_preds,shape_preds = pred_tup
+
+            # Calc Losses
+            post_obj_preds = try_key(hyps,'post_obj_preds',False)
+            loss_tup = calc_losses(loc_preds,color_preds,shape_preds,
+                                   loc_targs,color_targs,shape_targs,
+                                   starts,dones,
+                                   post_obj_preds=post_obj_preds)
+            loc_loss,color_loss,shape_loss,color_acc,shape_acc=loss_tup
+            obj_loss = (color_loss + shape_loss)/2
+            obj_acc = ((color_acc + shape_acc)/2)
+            loss = alpha*loc_loss + (1-alpha)*obj_loss
+
+            back_loss = loss / hyps['n_loss_loops']
+            back_loss.backward()
+
+            avg_loss +=      loss.item()
+            avg_rew +=       rews.mean()
+            avg_loc_loss +=  loc_loss.item()
+            avg_obj_loss +=  obj_loss.item()
+            avg_color_loss+= color_loss.item()
+            avg_shape_loss+= shape_loss.item()
+            avg_color_acc += color_acc.item()
+            avg_shape_acc += shape_acc.item()
+            avg_obj_acc   += obj_acc.item()
 
             if rollout % hyps['n_loss_loops'] == 0:
                 optimizer.step()
                 optimizer.zero_grad()
 
-            s = "LocL:{:.5f} | RewL:{:.5f} |" 
-            s +=" Obj:{:.5f} | {:.0f}% | t:{:.2f}"
+            s = "LocL:{:.5f} | Obj:{:.5f} | {:.0f}% | t:{:.2f}"
             div = (rollout+1)
-            s= s.format(avg_loc_loss/div,avg_rew_loss/div,
-                                         avg_obj_loss/div,
+            s= s.format(avg_loc_loss/div,avg_obj_loss/div,
                                          rollout/hyps['n_rollouts']*100,
                                          time.time()-iter_start)
             print(s, end=len(s)*" " + "\r")
@@ -201,7 +226,6 @@ def train(rank, hyps, verbose=True):
         print()
         train_avg_loss = avg_loss / hyps['n_rollouts']
         train_loc_loss = avg_loc_loss / hyps['n_rollouts']
-        train_rew_loss = avg_rew_loss / hyps['n_rollouts']
         train_color_loss = avg_color_loss / hyps['n_rollouts']
         train_shape_loss = avg_shape_loss / hyps['n_rollouts']
         train_obj_loss = avg_obj_loss / hyps['n_rollouts']
@@ -210,11 +234,9 @@ def train(rank, hyps, verbose=True):
         train_obj_acc = avg_obj_acc / hyps['n_rollouts']
         train_avg_rew = avg_rew / hyps['n_rollouts']
 
-        s = "Train - Loss:{:.5f} | Loc:{:.5f} | "
-        s += "RewLoss:{:.5f} | Rew:{:.5f}\n"
+        s = "Train - Loss:{:.5f} | Loc:{:.5f} | Rew:{:.5f}\n"
         s += "Obj Loss:{:.5f} | Obj Acc:{:.5f}\n"
         stats_string = s.format(train_avg_loss, train_loc_loss,
-                                                train_rew_loss,
                                                 train_avg_rew,
                                                 train_obj_loss,
                                                 train_obj_acc)
@@ -223,78 +245,16 @@ def train(rank, hyps, verbose=True):
         print("Evaluating")
         done = True
         model.eval()
-        n_eps = -1
-        n_loops = 0
-        targs = []
-        preds = []
-        rews = []
-        rew_preds = []
-        color_preds = [] if try_key(hyps,'obj_recog',False) else None
-        shape_preds = [] if try_key(hyps,'obj_recog',False) else None
-        sum_loss = 0
-        sum_rew = 0
-        sum_loc_loss = 0
-        sum_rew_loss = 0
-        sum_obj_loss = 0
-        sum_obj_acc = 0
+        val_runner.model = model
         with torch.no_grad():
-            while n_eps < 20:
-                if done:
-                    obs,_ = env.reset()
-                    model.reset_h()
-                    n_eps += 1
-                tup = model(obs[None].to(DEVICE))
-                pred,rew_pred,color_pred,shape_pred = tup
-                obs,targ,rew,done,_ = env.step(pred)
-                sum_rew += rew
-                n_loops += 1
+            loss_tup = val_runner.rollout(0,validation=True,n_tsteps=200)
+            loss_tup = [x.item() for x in loss_tup]
+            val_loc_loss,val_color_loss,val_shape_loss=loss_tup[:3]
+            val_color_acc,val_shape_acc,val_rew=loss_tup[3:]
+            val_obj_loss = ((val_color_loss + val_shape_loss)/2)
+            val_obj_acc = ((val_color_acc + val_shape_acc)/2)
+            val_loss = alpha*val_loc_loss + (1-alpha)*val_obj_loss
 
-                preds.append(pred)
-                rew_preds.append(rew_pred)
-                rews.append(rew)
-                if obj_recog:
-                    color_preds.append(color_pred)
-                    shape_preds.append(shape_pred)
-                targs.append(targ)
-
-            preds = torch.stack(preds).squeeze()
-            targs = torch.stack(targs)
-            targs,obj_targs = targs[:,:2],targs[:,2:]
-            val_loc_loss = lossfxn(preds,targs.to(DEVICE)).item()
-
-            rew_preds = torch.stack(rew_preds)
-            rews = torch.FloatTensor(rews)
-            val_rew_loss = lossfxn(rew_preds.squeeze(),rews.to(DEVICE))
-            val_rew_loss = val_rew_loss.item()
-
-            if obj_recog:
-                obj_targs = obj_targs.long().to(DEVICE)
-                color_preds = torch.stack(color_preds).squeeze()
-                val_color_loss = F.cross_entropy(color_preds,
-                                             obj_targs[:,0])
-                shape_preds = torch.stack(shape_preds).squeeze()
-                val_shape_loss = F.cross_entropy(shape_preds,
-                                             obj_targs[:,1])
-                val_obj_loss = color_loss + shape_loss
-
-                maxes = torch.argmax(color_preds,dim=-1)
-                val_color_acc = (maxes==obj_targs[:,0]).float().mean()
-                maxes = torch.argmax(shape_preds,dim=-1)
-                val_shape_acc = (maxes==obj_targs[:,1]).float().mean()
-                val_obj_acc = ((color_acc + shape_acc)/2).item()
-
-            else:
-                val_obj_loss = torch.zeros(1).to(DEVICE)
-                val_color_loss = torch.zeros(1).to(DEVICE)
-                val_shape_loss = torch.zeros(1).to(DEVICE)
-                val_color_acc = 0
-                val_shape_acc = 0
-                val_obj_acc = 0
-
-            val_loss = alpha*(val_loc_loss+val_obj_loss)
-            val_loss = val_loss+(1-alpha)*val_rew_loss
-            val_loss = val_loss / hyps['n_loss_loops']
-        val_rew = sum_rew/n_loops
         stats_string += "Evaluation Avg Rew: {:.5f}\n".format(val_rew)
 
         optimizer.zero_grad()
@@ -304,7 +264,6 @@ def train(rank, hyps, verbose=True):
 
             "train_loss":train_avg_loss,
             "train_loc_loss":train_loc_loss,
-            "train_rew_loss":train_rew_loss,
             "train_color_loss": train_color_loss,
             "train_shape_loss": train_shape_loss,
             "train_obj_loss":train_obj_loss,
@@ -314,7 +273,6 @@ def train(rank, hyps, verbose=True):
 
             "val_loss":val_loss,
             "val_loc_loss":val_loc_loss,
-            "val_rew_loss":val_rew_loss,
             "val_color_loss": val_color_loss,
             "val_shape_loss": val_shape_loss,
             "val_obj_loss":val_obj_loss,
@@ -374,8 +332,6 @@ class Runner:
         Call this function for starting the process
         """
         self.model = model
-        lossfxn_name = try_key(self.hyps,'lossfxn',"MSELoss")
-        self.lossfxn = getattr(nn,lossfxn_name)()
         if self.env is None:
             self.hyps['seed'] = self.hyps['seed'] + self.rank
             self.env = environments.get_env(self.hyps)
@@ -384,13 +340,13 @@ class Runner:
         if multi_proc:
             while True:
                 idx = self.gate_q.get() # Opened from main process
-                self.rollout(idx)
+                _ = self.rollout(idx)
                 # Signals to main process that data has been collected
                 self.stop_q.put(idx)
         else:
             self.rollout(0)
 
-    def rollout(self, idx):
+    def rollout(self, idx, validation=False,n_tsteps=None):
         """
         rollout handles the actual rollout of the environment for
         n steps in time. It is called from run and performs a single
@@ -400,85 +356,164 @@ class Runner:
         idx: int
             identification number distinguishing the portion of the
             shared array designated for this runner
+        validation: bool
+            if true, this runner is used as a validation runner
+        n_tsteps: int
+            number of steps to take in this rollout
         """
         hyps = self.hyps
-        n_tsteps = hyps['n_tsteps']
-        self.model.reset_h()
-        obs,targ = self.env.reset()
-        obsrs = [obs]
-        targs = []
-        preds = []
-        rew_preds = []
         obj_recog = try_key(hyps,'obj_recog',False)
-        color_preds = [] if obj_recog else None
-        shape_preds = [] if obj_recog else None
-        rews  = []
-        dones = []
-        alpha = try_key(hyps,'rew_alpha',.7)
-        # TODO: figure out way to store states and observations
-        # for faster training
-        while len(rews) < n_tsteps:
-            tup = self.model(obs[None].to(DEVICE))
-            pred,rew_pred,color_pred,shape_pred = tup
-            preds.append(pred)
-            rew_preds.append(rew_pred)
+        n_tsteps = hyps['n_tsteps'] if n_tsteps is None else n_tsteps
+
+        h = self.model.reset_h()
+        obs,targ = self.env.reset()
+        obs = obs.cuda()
+
+        obsrs = [obs]
+        targs = [targ]
+        rews  = [0]
+        dones = [0]
+        starts = [1]
+        hs = [h]
+        loc_preds = []
+        color_preds = []
+        shape_preds = []
+
+        with torch.no_grad():
+            while len(rews) < n_tsteps:
+                tup = self.model(obs[None].cuda())
+                pred,color_pred,shape_pred = tup
+
+                obs,targ,rew,done,_ = self.env.step(pred)
+
+                hs.append(self.model.h)
+                loc_preds.append(pred)
+                if obj_recog:
+                    color_preds.append(color_pred)
+                    shape_preds.append(shape_pred)
+                starts.append(0)
+                obs = obs.cuda()
+                obsrs.append(obs)
+                rews.append(rew)
+                dones.append(done)
+                targs.append(targ)
+
+                if done and len(rews) < n_tsteps:
+                    # Want to make prediction on final frame
+                    tup = self.model(obs[None])
+                    pred,color_pred,shape_pred = tup
+                    loc_preds.append(pred)
+                    if obj_recog:
+                        color_preds.append(color_pred)
+                        shape_preds.append(shape_pred)
+
+                    obs,targ = self.env.reset()
+
+                    hs.append(self.model.reset_h())
+                    rews.append(0)
+                    dones.append(0)
+                    starts.append(1)
+                    obs = obs.cuda()
+                    obsrs.append(obs)
+                    targs.append(targ)
+
+        rews = torch.FloatTensor(rews).cuda()
+        hs = torch.vstack(hs).cuda()
+        dones = torch.LongTensor(dones).cuda()
+        starts = torch.LongTensor(starts).cuda()
+        obsrs = torch.stack(obsrs)
+        targs = torch.stack(targs).cuda()
+        loc_targs,obj_targs = targs[:,:2],targs[:,2:].long()
+
+        if not validation:
+            # Send data to main proc
+            startx = idx*n_tsteps
+            endx = (idx+1)*n_tsteps
+            self.shared_data['rews'][startx:endx] = rews
+            self.shared_data['hs'][startx:endx] = hs
+            self.shared_data['dones'][startx:endx] = dones
+            self.shared_data['starts'][startx:endx] = starts
+            self.shared_data['obsrs'][startx:endx] = obsrs
+            self.shared_data['loc_targs'][startx:endx] = loc_targs
+            self.shared_data['obj_targs'][startx:endx] = obj_targs
+
+        if validation:
+            tup = self.model(obs[None].cuda())
+            pred,color_pred,shape_pred = tup
+            loc_preds.append(pred)
             if obj_recog:
                 color_preds.append(color_pred)
                 shape_preds.append(shape_pred)
-            obs,targ,rew,done,_ = self.env.step(pred)
-            rews.append(rew)
-            dones.append(done)
-            targs.append(targ)
-            if done:
-                obs,_ = self.env.reset()
-                self.model.reset_h()
-            obsrs.append(obs)
-        # Calc Loss
-        preds = torch.stack(preds).squeeze()
-        targs = torch.stack(targs)
-        targs,obj_targs = targs[:,:2],targs[:,2:]
-        loc_loss = self.lossfxn(preds,targs.to(DEVICE))
-        rew_preds = torch.stack(rew_preds)
-        rews = torch.FloatTensor(rews)
-        rew_loss = self.lossfxn(rew_preds.squeeze(),rews.to(DEVICE))
 
-        if obj_recog:
-            obj_targs = obj_targs.long().to(DEVICE)
-            color_preds = torch.stack(color_preds).squeeze()
-            color_loss = F.cross_entropy(color_preds,
-                                         obj_targs[:,0])
-            shape_preds = torch.stack(shape_preds).squeeze()
-            shape_loss = F.cross_entropy(shape_preds,
-                                         obj_targs[:,1])
-            obj_loss = color_loss + shape_loss
-            with torch.no_grad():
-                maxes = torch.argmax(color_preds,dim=-1)
-                color_acc = (maxes==obj_targs[:,0]).float().mean()
-                maxes = torch.argmax(shape_preds,dim=-1)
-                shape_acc = (maxes==obj_targs[:,1]).float().mean()
-                obj_acc = ((color_acc + shape_acc)/2).item()
-        else:
-            obj_loss = torch.zeros(1).to(DEVICE)
-            color_loss = torch.zeros(1).to(DEVICE)
-            shape_loss = torch.zeros(1).to(DEVICE)
-            color_acc = 0
-            shape_acc = 0
-            obj_acc = 0
+            loc_preds = torch.vstack(loc_preds)
+            if len(color_preds) > 0:
+                color_preds = torch.vstack(color_preds)
+                shape_preds = torch.vstack(shape_preds)
+            color_targs,shape_targs = obj_targs[:,0],obj_targs[:,1]
 
-        loss = alpha*(loc_loss+obj_loss) + (1-alpha)*rew_loss
-        loss = loss / hyps['n_loss_loops'] / hyps['n_runs']
-        loss.backward()
+            post_obj_preds = try_key(hyps,'post_obj_preds',False)
+            if len(starts)>len(loc_preds):
+                starts = starts[:-1]
+                dones = dones[:-1]
+            elif len(starts)<len(loc_preds):
+                loc_preds = loc_preds[:-1]
+                color_preds = color_preds[:-1]
+                shape_preds = shape_preds[:-1]
+            loss_tup = calc_losses(loc_preds,color_preds,shape_preds,
+                                   loc_targs,color_targs,shape_targs,
+                                   starts,dones,
+                                   post_obj_preds=post_obj_preds)
+            loc_loss,color_loss,shape_loss,color_acc,shape_acc=loss_tup
 
-        startx = idx*n_tsteps
-        endx = (idx+1)*n_tsteps
-        self.shared_data['rews'][idx] = rews.mean()
-        self.shared_data['losses'][idx] = loss
-        self.shared_data['loc_losses'][idx] = loc_loss
-        self.shared_data['rew_losses'][idx] = rew_loss
+            return loc_loss,color_loss,shape_loss,\
+                    color_acc,shape_acc,rews.mean()
 
-        self.shared_data['obj_losses'][idx] = obj_loss
-        self.shared_data['color_losses'][idx] = color_loss
-        self.shared_data['color_accs'][idx] = color_acc
-        self.shared_data['shape_losses'][idx] = shape_loss
-        self.shared_data['shape_accs'][idx] = shape_acc
-        self.shared_data['obj_accs'][idx] = obj_acc
+def calc_losses(loc_preds,color_preds,shape_preds,
+                loc_targs,color_targs,shape_targs,
+                starts,dones,post_obj_preds=False):
+    """
+    loc_preds: FloatTensor (N,2)
+        the location predictions
+    color_preds: FloatTensor (N, N_COLORS)
+        the color predictions
+    shape_preds: FloatTensor (N, N_SHAPES)
+        the shape predictions
+    loc_targs: FloatTensor (N,2)
+        the location targets
+    color_targs: LongTensor (N,)
+        the color targets
+    shape_targs: LongTensor (N,)
+        the shape targets
+    dones: FloatTensor (N,)
+        the done signals
+    starts: FloatTensor (N,)
+        the start signals
+    post_obj_preds: bool
+        if the object predictions come after the movement
+    """
+    idxs = (1-dones).bool()
+    loc_preds = loc_preds[idxs]
+    loc_targs = loc_targs[idxs]
+
+    loc_loss = F.mse_loss(loc_preds.cuda(), loc_targs.cuda())
+    if len(color_preds) > 0:
+        color_targs = color_targs[idxs]
+        shape_targs = shape_targs[idxs]
+        if post_obj_preds:
+            idxs = (1-starts).bool()
+        color_preds = color_preds[idxs]
+        shape_preds = shape_preds[idxs]
+
+        color_loss = F.cross_entropy(color_preds, color_targs)
+        shape_loss = F.cross_entropy(shape_preds, shape_targs)
+        with torch.no_grad():
+            maxes = torch.argmax(color_preds,dim=-1)
+            color_acc = (maxes==color_targs).float().mean()
+            maxes = torch.argmax(shape_preds,dim=-1)
+            shape_acc = (maxes==shape_targs).float().mean()
+    else:
+        color_loss = torch.zeros(1).to(DEVICE)
+        shape_loss = torch.zeros(1).to(DEVICE)
+        color_acc = torch.zeros(1)
+        shape_acc = torch.zeros(1)
+    return loc_loss, color_loss, shape_loss, color_acc, shape_acc

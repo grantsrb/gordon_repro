@@ -90,7 +90,7 @@ class TransformerLocator(LocatorBase):
             color = self.color(h[:,0])
             shape = self.shape(h[:,0])
         else:
-            color,shape = None,None
+            color,shape = [],[]
         self.h = torch.cat([self.fresh_h(len(x)),h],axis=1)
         return loc,color,shape
 
@@ -165,7 +165,8 @@ class RNNLocator(LocatorBase):
             color = self.color(h)
             shape = self.shape(h)
         else:
-            color,shape = None,None
+            color,shape = [],[]
+        self.h = h
         return loc,color,shape
 
 class CNNBase(nn.Module):

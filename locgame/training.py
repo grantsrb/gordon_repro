@@ -537,7 +537,7 @@ class Runner:
                 starts.append(start)
                 dones.append(done)
 
-                if done>0 and len(rews) < n_tsteps:
+                if done>0 and len(rews)<n_tsteps:
                     # Finish out last step
                     tup = self.model(obs[None])
                     pred,color_pred,shape_pred = tup
@@ -696,13 +696,13 @@ def bptt(hyps, model, obsrs, hs, starts):
     for i in range(n_tsteps):
         obs = obsrs[:,i]
         h = model.h
-        h = h*resets[:,i].data+h_inits.data*starts[:,i].data
-        #if starts[:,i].sum() > 0:
-        #    new_hs = []
-        #    for j in range(len(starts)):
-        #        new_h = h[j] if starts[j,i] < 1 else h_inits[j].data
-        #        new_hs.append(new_h)
-        #    h = torch.stack(new_hs)
+        #h = h*resets[:,i].data+h_inits.data*starts[:,i].data
+        if starts[:,i].sum() > 0:
+            new_hs = []
+            for j in range(len(starts)):
+                new_h = h[j] if starts[j,i] < 1 else h_inits[j].data
+                new_hs.append(new_h)
+            h = torch.stack(new_hs)
         loc_pred,color_pred,shape_pred = model(obs,h)
         loc_preds.append(loc_pred)
         color_preds.append(color_pred)

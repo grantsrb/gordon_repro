@@ -25,7 +25,8 @@ hyps = checkpt['hyps']
 if "absoluteCoords" not in hyps['float_params']:
     params = hyps['float_params']
     params['absoluteCoords'] = float(not params["egoCentered"])
-hyps['env_name'] = env_name
+if env_name is not None:
+    hyps['env_name'] = env_name
 
 print("Making Env")
 hyps['seed'] = int(time.time())

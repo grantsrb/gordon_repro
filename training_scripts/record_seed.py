@@ -13,6 +13,8 @@ DEVICE = torch.device("cuda:0")
 
 repeat = 15 # Set this to longer to linger on images longer
 n_unique_frames = 100 # Set this to longer to get more unique game xp
+env_name = "~/loc_games/LocationGameLinux_1/LocationGameLinux.x86_64"
+seed = None
 
 """
 To use this script, argue a model folder or checkpt to be examined
@@ -20,15 +22,18 @@ To use this script, argue a model folder or checkpt to be examined
 $ python3 watch_model.py <path_to_model>
 """
 
-env_name = None
 
 checkpt = io.load_checkpoint(sys.argv[1])
 hyps = checkpt['hyps']
 if "absoluteCoords" not in hyps['float_params']:
     params = hyps['float_params']
     params['absoluteCoords'] = float(not params["egoCentered"])
+print(hyps['float_params'])
 if env_name is not None:
     hyps['env_name'] = env_name
+if seed is not None:
+    hyps['seed'] = seed
+
 
 print("Making Env")
 env = environments.UnityGymEnv(**hyps)
@@ -52,6 +57,8 @@ with torch.no_grad():
             frames.append(np.tile(img[None],(repeat,1,1,1)))
         pred,rew_pred,color,shape = model(obs[None].to(DEVICE))
         obs,targ,rew,done,_ = env.step(pred)
+        print("pred:", pred.cpu().data.numpy())
+        print("targ:", targ)
         sum_rew += rew
         if color is not None:
             color = torch.argmax(color[0]).item()

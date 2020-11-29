@@ -18,14 +18,15 @@ To use this script, argue a model folder or checkpt to be examined
 $ python3 watch_model.py <path_to_model>
 """
 
-env_name = "~/loc_games/LocationGameLinux_1/LocationGameLinux.x86_64"
+env_name = None
 
 checkpt = io.load_checkpoint(sys.argv[1])
 hyps = checkpt['hyps']
 if "absoluteCoords" not in hyps['float_params']:
     params = hyps['float_params']
     params['absoluteCoords'] = float(not params["egoCentered"])
-hyps['env_name'] = env_name
+if env_name is not None:
+    hyps['env_name'] = env_name
 
 print("Making Env")
 hyps['seed'] = int(time.time())
@@ -49,10 +50,10 @@ with torch.no_grad():
             plt.show()
             if n_loops > 0:
                 print("Running Mean Rew:", sum_rew/n_loops)
-        pred,rew_pred,color,shape = model(obs[None].to(DEVICE))
+        pred,color,shape = model(obs[None].to(DEVICE))
         obs,targ,rew,done,_ = env.step(pred)
         sum_rew += rew
-        if color is not None:
+        if len(color) > 0:
             color = torch.argmax(color[0]).item()
             shape = torch.argmax(shape[0]).item()
         pred = pred.squeeze().cpu().data.tolist() + [color,shape]

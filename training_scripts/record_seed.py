@@ -11,8 +11,8 @@ from tqdm import tqdm
 
 DEVICE = torch.device("cuda:0")
 
-repeat = 20 # Set this to longer to linger on images longer
-n_unique_frames = 2000 # Set this to longer to get more unique game xp
+repeat = 15 # Set this to longer to linger on images longer
+n_unique_frames = 100 # Set this to longer to get more unique game xp
 
 """
 To use this script, argue a model folder or checkpt to be examined
@@ -20,14 +20,15 @@ To use this script, argue a model folder or checkpt to be examined
 $ python3 watch_model.py <path_to_model>
 """
 
-env_name = "~/loc_games/LocationGameLinux_1/LocationGameLinux.x86_64"
+env_name = None
 
 checkpt = io.load_checkpoint(sys.argv[1])
 hyps = checkpt['hyps']
 if "absoluteCoords" not in hyps['float_params']:
     params = hyps['float_params']
     params['absoluteCoords'] = float(not params["egoCentered"])
-hyps['env_name'] = env_name
+if env_name is not None:
+    hyps['env_name'] = env_name
 
 print("Making Env")
 env = environments.UnityGymEnv(**hyps)
@@ -63,7 +64,7 @@ with torch.no_grad():
 
 frames = np.vstack(frames)
 frames = np.uint8(frames*255/2+255/2)
-out = cv2.VideoWriter("output.mp4", cv2.VideoWriter_fourcc(*'mp4v'), 30, (84,84))
+out = cv2.VideoWriter("output.mp4", cv2.VideoWriter_fourcc(*'mp4v'), 30, img.shape[:2])
 for frame in frames:
     out.write(frame) # frame is a numpy.ndarray with shape (1280,720,3)
 out.release()

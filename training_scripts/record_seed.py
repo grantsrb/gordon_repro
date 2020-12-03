@@ -8,14 +8,22 @@ import torch
 import numpy as np
 import cv2
 from tqdm import tqdm
+import torch.nn.functional as F
 
 DEVICE = torch.device("cuda:0")
 
 repeat = 15 # Set this to longer to linger on images longer
-n_unique_frames = 500 # Set this to longer to get more unique game xp
+n_unique_frames = 50 # Set this to longer to get more unique game xp
 env_name = None # If none, defaults to argued model's env
 seed = None # If none, defaults to argued model's seed
+validate = False # Determine if environment should be heldout set
+output_name = "output.mp4"
+if len(sys.argv) > 2:
+    for arg in sys.argv[2:]:
+        if arg == "validate": validate = True
+        else: output_name = arg
 
+print("Saving to", output_name)
 """
 To use this script, argue a model folder or checkpt to be examined
 
@@ -28,6 +36,8 @@ hyps = checkpt['hyps']
 if "absoluteCoords" not in hyps['float_params']:
     params = hyps['float_params']
     params['absoluteCoords'] = float(not params["egoCentered"])
+if validate: print("Validation environment")
+hyps['float_params']["validation"] = validate
 if env_name is not None:
     hyps['env_name'] = env_name
 if seed is not None:
@@ -63,13 +73,21 @@ with torch.no_grad():
             frames.append(np.tile(img[None],(repeat,1,1,1)))
         tup = model(obs[None].to(DEVICE))
         if len(tup)==3: pred,color,shape = tup
-        else: pred,rew_p,color,shape = tup
+        else: pred,color,shape,rew_p = tup
         obs,targ,rew,done,_ = env.step(pred)
         sum_rew += rew
         if color is not None and len(color) > 0:
             color = torch.argmax(color[0]).item()
             shape = torch.argmax(shape[0]).item()
-        pred = pred.squeeze().cpu().data.tolist() + [color,shape]
+        loc = pred.squeeze().cpu().data.tolist()
+        if len(tup) > 3 and len(rew_p) > 0: rew_p = rew_p.cpu().data.tolist()
+        else: rew_p = []
+        disp_pred = loc + [color,shape]
+        #print("pred:", disp_pred)
+        #print("targ:", targ)
+        loc_loss = F.mse_loss(pred,torch.FloatTensor(targ[:2])[None].cuda())
+        #print("locL:", loc_loss.item())
+        #print()
         img = obs.squeeze().permute(1,2,0).data.numpy()/3
         frames.append(np.tile(img[None],(repeat,1,1,1)))
         n_loops += 1
@@ -77,7 +95,7 @@ with torch.no_grad():
 
 frames = np.vstack(frames)
 frames = np.uint8(frames*255/2+255/2)
-out = cv2.VideoWriter("output.mp4", cv2.VideoWriter_fourcc(*'mp4v'), 30, img.shape[:2])
+out = cv2.VideoWriter(output_name, cv2.VideoWriter_fourcc(*'mp4v'), 30, img.shape[:2])
 for frame in frames:
     out.write(frame) # frame is a numpy.ndarray with shape (1280,720,3)
 out.release()

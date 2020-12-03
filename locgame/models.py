@@ -16,9 +16,10 @@ N_COLORS = 7
 N_SHAPES = 7
 
 class LocatorBase(TransformerBase):
-    def __init__(self,obj_recog=False,*args,**kwargs):
+    def __init__(self,obj_recog=False,rew_recog=False,*args,**kwargs):
         super().__init__(*args,**kwargs)
         self.obj_recog = obj_recog
+        self.rew_recog = rew_recog
 
 class TransformerLocator(LocatorBase):
     def __init__(self, cnn_type="SimpleCNN", **kwargs):
@@ -122,12 +123,20 @@ class RNNLocator(LocatorBase):
                               hidden_size=self.emb_size)
 
         self.locator = nn.Sequential(
-            nn.LayerNorm(self.emb_size),
+            #nn.LayerNorm(self.emb_size),
             nn.Linear(self.emb_size, self.class_h_size),
             globals()[self.act_fxn](),
-            nn.LayerNorm(self.class_h_size),
+            #nn.LayerNorm(self.class_h_size),
             nn.Linear(self.class_h_size, 2),
             nn.Tanh()
+        )
+        # Reward model
+        self.pavlov = nn.Sequential(
+            #nn.LayerNorm(self.emb_size),
+            nn.Linear(self.emb_size, self.class_h_size),
+            globals()[self.act_fxn](),
+            #nn.LayerNorm(self.class_h_size),
+            nn.Linear(self.class_h_size, 1)
         )
         # Obj recognition model
         if self.obj_recog:
@@ -166,8 +175,20 @@ class RNNLocator(LocatorBase):
             shape = self.shape(h)
         else:
             color,shape = [],[]
+        if self.rew_recog:
+            rew = self.pavlov(h)
+        else:
+            rew = []
         self.h = h
-        return loc,color,shape
+        return loc,color,shape,rew
+
+class PooledRNNLocator(RNNLocator):
+    def __init__(self,**kwargs):
+        super().__init__(**kwargs)
+        self.pos_encoder = NullOp()
+        self.extractor = Pooler(self.cnn.shapes[-1],
+                                emb_size=self.emb_size,
+                                ksize=5)
 
 class CNNBase(nn.Module):
     def __init__(self, img_shape=(3,84,84), act_fxn="ReLU",
@@ -318,22 +339,16 @@ class SimpleCNN(CNNBase):
                 fx = self.intm_attns(fx)
         return fx.reshape(fx.shape[0],fx.shape[1],-1).permute(0,2,1)
 
-class MiddleCNN(CNNBase):
+class MediumCNN(CNNBase):
     """
     Middle complexity model
     """
-    def __init__(self, emb_size, intm_attn=0, chans=None,
-                                              strides=None,
-                                              **kwargs):
+    def __init__(self, emb_size, intm_attn=0, **kwargs):
         """
         emb_size: int
         intm_attn: int
             an integer indicating the number of layers for an attention
             layer in between convolutions
-        chans: list of int
-            a list of channel depths for each layer
-        strides: list of int
-            a list of cnn strides corresponding to each layer
         """
         super().__init__(**kwargs)
         self.emb_size = emb_size
@@ -343,18 +358,13 @@ class MiddleCNN(CNNBase):
         self.shapes = []
         shape = self.img_shape[-2:]
         self.shapes.append(shape)
-        if chans is None:
-            chans = [32,64,128,256,256,512,512,self.emb_size]
+        chans = [8,32,64,128,256,self.emb_size]
+        stride = 2
+        ksize = 7
         self.chans = chans
-        assert self.emb_size == chans[-1]
-        if strides is None:
-            strides = [1,1,1,2,2,2,2,(1,2)]
-        self.strides = strides
-        ksize = 3
         padding = 0
-        stride = self.strides[0]
         block = self.get_conv_block(in_chan=self.img_shape[-3],
-                                    out_chan=chans[0],
+                                    out_chan=self.chans[0],
                                     ksize=ksize,
                                     stride=stride,
                                     padding=padding,
@@ -371,8 +381,11 @@ class MiddleCNN(CNNBase):
                                            attn_size=self.attn_size,
                                            act_fxn=self.act_fxn)
             self.itmd_attns.append(attn)
+
+        ksize = 3
         for i in range(len(chans)-1):
-            stride = self.strides[i+1]
+            if i in {1,3}: stride = 2
+            else: stride = 1
             block = self.get_conv_block(in_chan=chans[i],
                                         out_chan=chans[i+1],
                                         ksize=ksize,
@@ -405,4 +418,39 @@ class MiddleCNN(CNNBase):
                 fx = self.intm_attns(fx)
         return fx.reshape(fx.shape[0],fx.shape[1],-1).permute(0,2,1)
 
+class Pooler(nn.Module):
+    """
+    A simple class to act as a dummy extractor that actually performs
+    a final convolution followed by a global average pooling
+    """
+    def __init__(self, shape, emb_size=512, ksize=5):
+        """
+        shape: tuple of ints (H,W)
+        emb_size: int
+        ksize: int
+        """
+        super().__init__()
+        self.emb_size = emb_size
+        self.ksize = ksize
+        self.shape = shape
+        self.conv = nn.Conv2d(self.emb_size, self.emb_size, self.ksize)
+        self.activ = nn.ReLU()
+        self.layer = nn.Sequential( self.conv, self.activ)
 
+    def forward(self, h, x):
+        """
+        h: dummy
+        x: torch FloatTensor (B,S,E)
+            the features from the cnn
+        """
+        shape = (len(x), self.emb_size, self.shape[0], self.shape[1])
+        x = x.permute(0,2,1).reshape(shape)
+        fx = self.layer(x)
+        return fx.reshape(*shape[:2],-1).mean(-1).unsqueeze(1) # (B,1,E)
+
+class NullOp(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x

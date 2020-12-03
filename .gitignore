@@ -128,4 +128,5 @@ training_scripts/*.csv
 *.pt
 *.pth
 *.p
+*.mp4
 

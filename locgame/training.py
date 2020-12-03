@@ -24,7 +24,7 @@ if torch.cuda.is_available():
 else:
     DEVICE = torch.device("cpu")
 
-def train(hyps, verbose=True):
+def train(rank, hyps, verbose=True):
     """
     hyps: dict
         contains all relavent hyperparameters

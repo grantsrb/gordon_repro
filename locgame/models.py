@@ -12,8 +12,8 @@ from ml_utils.utils import update_shape
 d = {i:"cuda:"+str(i) for i in range(torch.cuda.device_count())}
 DEVICE_DICT = {-1:"cpu", **d}
 
-N_COLORS = 5
-N_SHAPES = 5
+N_COLORS = 7
+N_SHAPES = 7
 
 class LocatorBase(TransformerBase):
     def __init__(self,obj_recog=False,*args,**kwargs):
@@ -264,13 +264,19 @@ class SimpleCNN(CNNBase):
         self.shapes = []
         shape = self.img_shape[-2:]
         self.shapes.append(shape)
-        chans = [32,64,128,256,self.emb_size]
+        if self.img_shape[1] <= 84:
+            chans = [32,64,128,256,self.emb_size]
+            stride = 1
+            ksize = 3
+        else:
+            chans = [3,32,64,128,256,self.emb_size]
+            stride = 2
+            ksize = 5
+            print("using extra layer for larger image size")
         self.chans = chans
-        ksize = 3
-        stride = 1
         padding = 0
         block = self.get_conv_block(in_chan=self.img_shape[-3],
-                                    out_chan=32,
+                                    out_chan=self.chans[0],
                                     ksize=ksize,
                                     stride=stride,
                                     padding=padding,

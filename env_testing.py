@@ -43,11 +43,12 @@ channel.set_configuration_parameters(time_scale = 1)
 for k,v in params.items():
     env_channel.set_float_parameter(k, v)
 env = UnityToGymWrapper(env, allow_multiple_obs=True)
+print("Environment created!")
 
-matplotlib.use("tkagg")
+#matplotlib.use("tkagg")
 obs = env.reset()
-plt.imshow(obs[0])
-plt.show()
+#plt.imshow(obs[0])
+#plt.show()
 done = False
 while True:
     print("stepping")
@@ -58,7 +59,7 @@ while True:
     print("targ:", obs[1])
     print("rew:", rew)
     print("done:", done)
-    plt.imshow(obs[0])
+    #plt.imshow(obs[0])
     plt.show()
     if done:
         obs = env.reset()

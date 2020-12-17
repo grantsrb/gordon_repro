@@ -30,6 +30,8 @@ def train(rank, hyps, verbose=True):
     hyps: dict
         contains all relavent hyperparameters
     """
+    if "randomizeObjs" in hyps:
+        assert False, "you mean randomizeObs, not randomizeObjs"
     hyps['main_path'] = try_key(hyps,'main_path',"./")
     checkpt,hyps = get_resume_checkpt(hyps,verbose=verbose) #incrs seed
     if checkpt is None:
@@ -282,7 +284,7 @@ def train(rank, hyps, verbose=True):
                                                         val_obj_loss,
                                                         val_obj_acc)
 
-        scheduler.step(val_loss)
+        scheduler.step(train_avg_loss)
         optimizer.zero_grad()
         save_dict = {
             "epoch":epoch,

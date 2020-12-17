@@ -34,6 +34,11 @@ if __name__=="__main__":
         print("Model Folders:", model_folders)
         lossfxn = nn.MSELoss()
         for model_folder in model_folders:
+            if manifest is not None and\
+                    model_folder in set(manifest['model_name']):
+                print("Model folder:", model_folder,
+                                  "already validated, continuing..")
+                continue
             table = {"model_name":[],
                     "gen_rew":[],
                     "gen_loss":[],

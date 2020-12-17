@@ -161,18 +161,22 @@ class UnityGymEnv:
                 print("Game in validation mode")
             env_channel.set_float_parameter(k, float(v))
         if worker_id is None: worker_id = seed%500
-        try:
-            env = UnityEnvironment(file_name=path,
-                               side_channels=[channel,env_channel],
-                               worker_id=worker_id,
-                               seed=seed)
-        except:
-            worker_id = worker_id +1+ int(np.random.random()*500)
-            env = UnityEnvironment(file_name=path,
-                               side_channels=[channel,env_channel],
-                               worker_id=worker_id,
-                               seed=seed)
-            
+        env_made = False
+        n_loops = 0
+        worker_id = 0
+        while not env_made and n_loops < 50:
+            try:
+                env = UnityEnvironment(file_name=path,
+                                   side_channels=[channel,env_channel],
+                                   worker_id=worker_id,
+                                   seed=seed)
+                env_made = True
+            except:
+                print("Error encountered making environment, trying new worker_id")
+                worker_id = worker_id + 1 + int(np.random.random()*500)
+                try: env.close()
+                except: pass
+                n_loops += 1
         env = UnityToGymWrapper(env, allow_multiple_obs=True)
         return env
 

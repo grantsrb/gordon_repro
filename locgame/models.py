@@ -16,9 +16,10 @@ N_COLORS = 7
 N_SHAPES = 7
 
 class LocatorBase(TransformerBase):
-    def __init__(self,obj_recog=False,*args,**kwargs):
+    def __init__(self,obj_recog=False,rew_recog=False,*args,**kwargs):
         super().__init__(*args,**kwargs)
         self.obj_recog = obj_recog
+        self.rew_recog = rew_recog
 
 class TransformerLocator(LocatorBase):
     def __init__(self, cnn_type="SimpleCNN", **kwargs):
@@ -52,14 +53,6 @@ class TransformerLocator(LocatorBase):
             nn.Linear(self.class_h_size, 2),
             nn.Tanh()
         )
-        # Reward model
-        self.pavlov = nn.Sequential(
-            nn.LayerNorm(self.emb_size),
-            nn.Linear(self.emb_size, self.class_h_size),
-            globals()[self.act_fxn](),
-            nn.LayerNorm(self.class_h_size),
-            nn.Linear(self.class_h_size, 1)
-        )
         # Obj recognition model
         if self.obj_recog:
             self.color = nn.Sequential(
@@ -82,28 +75,38 @@ class TransformerLocator(LocatorBase):
 
     def reset_h(self, batch_size=1):
         self.h = self.fresh_h(batch_size)
+        return self.h
 
-    def forward(self, x):
+    def forward(self, x, h=None):
         """
         x: torch float tensor (B,C,H,W)
         """
+        if h is None:
+            h = self.h
         feats = self.cnn(x)
         feats = self.pos_encoder(feats)
-        self.h = self.extractor(self.h, feats)
-        loc = self.locator(self.h[:,0])
-        rew = self.pavlov(self.h[:,0])
+        h = self.extractor(h, feats)
+        loc = self.locator(h[:,0])
         if self.obj_recog:
-            color = self.color(self.h[:,0])
-            shape = self.shape(self.h[:,0])
+            color = self.color(h[:,0])
+            shape = self.shape(h[:,0])
         else:
-            color,shape = None,None
-        self.h = torch.cat([self.fresh_h(len(x)),self.h],axis=1)
-        return loc,rew,color,shape
+            color,shape = [],[]
+        self.h = torch.cat([self.fresh_h(len(x)),h],axis=1)
+        return loc,color,shape
 
 class RNNLocator(LocatorBase):
-    def __init__(self, cnn_type="SimpleCNN", **kwargs):
+    def __init__(self, cnn_type="SimpleCNN", rnn_type="GRUCell",
+                                             **kwargs):
+        """
+        cnn_type: str
+            the class of cnn to use for creating features from the image
+        rnn_type: str
+            the class of rnn to use for the temporal model
+        """
         super().__init__(**kwargs)
         self.cnn_type = cnn_type
+        self.rnn_type = rnn_type
         self.cnn = globals()[self.cnn_type](**kwargs)
         self.pos_encoder = PositionalEncoder(self.cnn.seq_len,
                                              self.emb_size)
@@ -119,27 +122,28 @@ class RNNLocator(LocatorBase):
                                  prob_attn=self.prob_attn)
 
         # Learned initialization for rnn hidden vector
-        self.h_init = torch.randn(1,self.emb_size)
+        self.h_shape = (1,self.emb_size)
+        self.h_init = torch.randn(self.h_shape)
         divisor = float(np.sqrt(self.emb_size))
         self.h_init = nn.Parameter(self.h_init/divisor)
 
-        self.rnn = nn.GRUCell(input_size=self.emb_size,
-                              hidden_size=self.emb_size)
+        self.rnn = getattr(nn,self.rnn_type)(input_size=self.emb_size,
+                                             hidden_size=self.emb_size)
 
         self.locator = nn.Sequential(
-            nn.LayerNorm(self.emb_size),
+            #nn.LayerNorm(self.emb_size),
             nn.Linear(self.emb_size, self.class_h_size),
             globals()[self.act_fxn](),
-            nn.LayerNorm(self.class_h_size),
+            #nn.LayerNorm(self.class_h_size),
             nn.Linear(self.class_h_size, 2),
             nn.Tanh()
         )
         # Reward model
         self.pavlov = nn.Sequential(
-            nn.LayerNorm(self.emb_size),
+            #nn.LayerNorm(self.emb_size),
             nn.Linear(self.emb_size, self.class_h_size),
             globals()[self.act_fxn](),
-            nn.LayerNorm(self.class_h_size),
+            #nn.LayerNorm(self.class_h_size),
             nn.Linear(self.class_h_size, 1)
         )
         # Obj recognition model
@@ -161,23 +165,48 @@ class RNNLocator(LocatorBase):
 
     def reset_h(self, batch_size=1):
         self.h = self.h_init.repeat(batch_size,1)
+        return self.h
 
-    def forward(self, x):
+    def forward(self, x, h=None):
         """
         x: torch float tensor (B,C,H,W)
         """
+        if h is None:
+            h = self.h
         feats = self.cnn(x)
         feats = self.pos_encoder(feats)
-        feat = self.extractor(self.h.unsqueeze(1), feats)
-        self.h = self.rnn(feat.mean(1),self.h)
-        loc = self.locator(self.h)
-        rew = self.pavlov(self.h)
+        feat = self.extractor(h.unsqueeze(1), feats)
+        h = self.rnn(feat.mean(1),h)
+        loc = self.locator(h)
         if self.obj_recog:
-            color = self.color(self.h)
-            shape = self.shape(self.h)
+            color = self.color(h)
+            shape = self.shape(h)
         else:
-            color,shape = None,None
-        return loc,rew,color,shape
+            color,shape = [],[]
+        if self.rew_recog:
+            rew = self.pavlov(h)
+        else:
+            rew = []
+        self.h = h
+        return loc,color,shape,rew
+
+class PooledRNNLocator(RNNLocator):
+    def __init__(self,**kwargs):
+        super().__init__(**kwargs)
+        self.pos_encoder = NullOp()
+        self.extractor = Pooler(self.cnn.shapes[-1],
+                                emb_size=self.emb_size,
+                                ksize=5)
+        print("Using PooledRNNLocator")
+
+class ConcatRNNLocator(RNNLocator):
+    def __init__(self,**kwargs):
+        super().__init__(**kwargs)
+        self.pos_encoder = NullOp()
+        self.extractor = Concatenater(self.cnn.shapes[-1],
+                                      emb_size=self.emb_size,
+                                      ksize=5)
+        print("Using ConcatRNNLocator")
 
 class CNNBase(nn.Module):
     def __init__(self, img_shape=(3,84,84), act_fxn="ReLU",
@@ -328,22 +357,16 @@ class SimpleCNN(CNNBase):
                 fx = self.intm_attns(fx)
         return fx.reshape(fx.shape[0],fx.shape[1],-1).permute(0,2,1)
 
-class MiddleCNN(CNNBase):
+class MediumCNN(CNNBase):
     """
     Middle complexity model
     """
-    def __init__(self, emb_size, intm_attn=0, chans=None,
-                                              strides=None,
-                                              **kwargs):
+    def __init__(self, emb_size, intm_attn=0, **kwargs):
         """
         emb_size: int
         intm_attn: int
             an integer indicating the number of layers for an attention
             layer in between convolutions
-        chans: list of int
-            a list of channel depths for each layer
-        strides: list of int
-            a list of cnn strides corresponding to each layer
         """
         super().__init__(**kwargs)
         self.emb_size = emb_size
@@ -353,18 +376,13 @@ class MiddleCNN(CNNBase):
         self.shapes = []
         shape = self.img_shape[-2:]
         self.shapes.append(shape)
-        if chans is None:
-            chans = [32,64,128,256,256,512,512,self.emb_size]
+        chans = [8,32,64,128,256,self.emb_size]
+        stride = 2
+        ksize = 7
         self.chans = chans
-        assert self.emb_size == chans[-1]
-        if strides is None:
-            strides = [1,1,1,2,2,2,2,(1,2)]
-        self.strides = strides
-        ksize = 3
         padding = 0
-        stride = self.strides[0]
         block = self.get_conv_block(in_chan=self.img_shape[-3],
-                                    out_chan=chans[0],
+                                    out_chan=self.chans[0],
                                     ksize=ksize,
                                     stride=stride,
                                     padding=padding,
@@ -381,8 +399,11 @@ class MiddleCNN(CNNBase):
                                            attn_size=self.attn_size,
                                            act_fxn=self.act_fxn)
             self.itmd_attns.append(attn)
+
+        ksize = 3
         for i in range(len(chans)-1):
-            stride = self.strides[i+1]
+            if i in {1,3}: stride = 2
+            else: stride = 1
             block = self.get_conv_block(in_chan=chans[i],
                                         out_chan=chans[i+1],
                                         ksize=ksize,
@@ -415,4 +436,206 @@ class MiddleCNN(CNNBase):
                 fx = self.intm_attns(fx)
         return fx.reshape(fx.shape[0],fx.shape[1],-1).permute(0,2,1)
 
+def deconv_block(in_depth, out_depth, ksize=3, stride=1,
+                                               padding=0,
+                                               bnorm=False,
+                                               act_fxn='ReLU',
+                                               drop_p=0):
+    """
+    Creates a deconvolution layer
+
+    in_depth: int
+    out_depth: int
+    ksize: int
+    stride: int
+    padding: int
+    bnorm: bool
+        determines if a batchnorm layer should be inserted just after
+        the deconvolution
+    act_fxn: str
+        the name of the activation class
+    drop_p: float
+        the probability of an activation being dropped
+    """
+    block = []
+    block.append(nn.ConvTranspose2d(in_depth, out_depth,
+                                              ksize,
+                                              stride=stride,
+                                              padding=padding))
+    if bnorm:
+        block.append(nn.BatchNorm2d(out_depth))
+    block.append(nn.Dropout(drop_p))
+    if activation is not None:
+        block.append(getattr(nn, act_fxn))
+    return nn.Sequential(*block)
+
+class SimpleDeconv(nn.Module):
+    def __init__(self, emb_shape, img_shape, h_size, s_size,
+                                                     bnorm=True,
+                                                     noise=0):
+        """
+        emb_shape - list like (C, H, W)
+            the initial shape to reshape the embedding inputs
+            (can take from encoder.emb_shape)
+        img_shape - list like (C, H, W)
+            the final shape of the decoded tensor
+        h_size - int
+            size of belief vector h
+        bnorm - bool
+            optional, if true, model uses batchnorm
+        noise - float
+            standard deviation of gaussian noise added at each layer
+        """
+        super(Decoder, self).__init__()
+        self.emb_shape = emb_shape
+        self.img_shape = img_shape
+        self.h_size = h_size
+        self.noise = noise
+        self.bnorm = bnorm
+
+        depth, height, width = emb_shape
+        first_ksize = 9
+        ksize = 3
+        padding = 0
+        modules = []
+        self.sizes = []
+        modules.append(Reshape((-1, depth, height, width)))
+        deconv = deconv_block(depth, depth, ksize=ksize,stride=1,
+                                                       padding=0,
+                                                       bnorm=self.bnorm,
+                                                       noise=self.noise)
+        height, width = update_shape((height,width), kernel=ksize,
+                                                      op="deconv")
+        self.sizes.append((height, width))
+        modules.append(deconv)
+
+        while height < self.img_shape[-2] and width < self.img_shape[-1]:
+            stride = 2 if i % 3 == 0 else 1
+            modules.append(deconv_block(depth, depth, ksize=ksize,
+                                        padding=padding, stride=stride,
+                                        bnorm=self.bnorm, noise=noise))
+            height, width = update_shape((height,width), kernel=ksize,
+                                                         stride=stride,
+                                                         op="deconv")
+            self.sizes.append((height, width))
+            print("h:", height, "| w:", width)
+        
+        diff = height-self.img_shape[-2]
+        modules.append(nn.Conv2d(depth,self.img_shape[0],diff+1))
+        height, width = update_shape((height,width), kernel=3)
+        print("decoder:", height, width)
+        self.sizes.append((height, width))
+        
+        self.sequential = nn.Sequential(*modules)
+        emb_size = int(np.prod(emb_shape))
+        self.resize = nn.Sequential(nn.Linear(h_size, emb_size),
+                                            Reshape((-1, *emb_shape)))
+
+    def forward(self, x):
+        """
+        x - torch FloatTensor
+            should be h and s concatenated
+        """
+        emb = self.resize(x)
+        return self.sequential(emb)
+
+    def extra_repr(self):
+        s = "emb_shape={}, img_shape={}, bnorm={}, noise={}"
+        return s.format(self.emb_shape, self.img_shape, self.bnorm,
+                                                        self.noise)
+
+class Pooler(nn.Module):
+    """
+    A simple class to act as a dummy extractor that actually performs
+    a final convolution followed by a global average pooling
+    """
+    def __init__(self, shape, emb_size=512, ksize=5):
+        """
+        shape: tuple of ints (H,W)
+        emb_size: int
+        ksize: int
+        """
+        super().__init__()
+        self.emb_size = emb_size
+        self.ksize = ksize
+        self.shape = shape
+        self.conv = nn.Conv2d(self.emb_size, self.emb_size, self.ksize)
+        self.activ = nn.ReLU()
+        self.layer = nn.Sequential( self.conv, self.activ)
+
+    def forward(self, h, x):
+        """
+        h: dummy
+        x: torch FloatTensor (B,S,E)
+            the features from the cnn
+        """
+        shape = (len(x), self.emb_size, self.shape[0], self.shape[1])
+        x = x.permute(0,2,1).reshape(shape)
+        fx = self.layer(x)
+        return fx.reshape(*shape[:2],-1).mean(-1).unsqueeze(1) # (B,1,E)
+
+class Concatenater(nn.Module):
+    """
+    A simple class to act as a dummy extractor that actually performs
+    a another convolution followed by a feature concatenation and 
+    nonlinear projection to a single feature vector.
+    """
+    def __init__(self, shape, emb_size=512, ksize=5, h_size=1000):
+        """
+        shape: tuple of ints (H,W)
+        emb_size: int
+        ksize: int
+        """
+        super().__init__()
+        self.emb_size = emb_size
+        self.ksize = ksize
+        self.shape = shape
+        self.h_size = h_size
+        self.conv = nn.Conv2d(self.emb_size, self.emb_size, self.ksize)
+        self.activ = nn.ReLU()
+        self.layer = nn.Sequential( self.conv, self.activ)
+        new_shape = update_shape(self.shape, kernel=ksize,
+                                             stride=1,
+                                             padding=0)
+        flat_size = new_shape[-2]*new_shape[-1]*self.emb_size
+        self.collapser = nn.Sequential(
+                    nn.Linear(flat_size,self.h_size),
+                    nn.ReLU(),
+                    nn.Linear(self.h_size, self.emb_size)
+                    )
+
+
+    def forward(self, h, x):
+        """
+        h: dummy
+        x: torch FloatTensor (B,S,E)
+            the features from the cnn
+        """
+        shape = (len(x), self.emb_size, self.shape[0], self.shape[1])
+        x = x.permute(0,2,1).reshape(shape)
+        fx = self.layer(x).reshape(len(x), -1)
+        fx = self.collapser(fx)
+        return fx.reshape(len(x),1,self.emb_size) # (B,1,E)
+
+class NullOp(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+
+class Reshape(nn.Module):
+    """
+    Reshapes the activations to be of shape (B, *shape) where B
+    is the batch size.
+    """
+    def __init__(self, shape):
+        super(Reshape, self).__init__()
+        self.shape = shape
+
+    def forward(self, x):
+        return x.view(self.shape)
+
+    def extra_repr(self):
+        return "shape={}".format(self.shape)
 

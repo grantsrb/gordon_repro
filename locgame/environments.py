@@ -13,6 +13,84 @@ from gym_unity.envs import UnityToGymWrapper
 from mlagents_envs.side_channel.engine_configuration_channel import EngineConfigurationChannel
 from mlagents_envs.side_channel.environment_parameters_channel import EnvironmentParametersChannel
 
+class GymEnv:
+    def __init__(self, env_name, prep_fxn, seed=int(time.time()),
+                                           worker_id=None,
+                                           float_params=dict(),
+                                           **kwargs):
+        """
+        env_name: str
+            the name of the environment
+        prep_fxn: str
+            the name of the preprocessing function to be used on each
+            of the observations
+        seed: int
+            the random seed for the environment
+        worker_id: int
+            must specify a unique worker id for each unity process
+            on this machine
+        float_params: dict or None
+            this should be a dict of argument settings for the unity
+            environment
+            keys: varies by environment
+        """
+        self.env_name = env_name
+        self.prep_fxn = globals()[prep_fxn]
+        self.seed = seed
+        self.worker_id = worker_id
+        self.float_params = float_params
+
+        self.env = gym.make(self.env_name)
+        obs,action_targ = self.reset()
+        self.shape = obs.shape
+        self.targ_shape = action_targ.shape
+        # Discrete action spaces are not yet implemented
+        self.is_discrete = True
+
+    def prep_obs(self, obs):
+        """
+        obs: list or ndarray
+            the observation returned by the environment
+        """
+        obs = self.prep_fxn(obs.transpose(2,0,1))
+        return [torch.FloatTensor(obs),torch.zeros(4)]
+
+    def reset(self):
+        obs = self.env.reset()
+        return self.prep_obs(obs)
+
+    def step(self,pred):
+        """
+        action: list, vector, or int
+            the action to take in this step. type can vary depending
+            on the environment type
+        """
+        action = self.get_action(pred)
+        obs,rew,done,info = self.env.step(action)
+        obs,targ = self.prep_obs(obs)
+        targ[:2] = np.clip(targ[:2],-1,1)
+        return obs, targ, rew, done, info
+
+    def get_action(self, preds):
+        """
+        Action data types can vary from evnironment to environment.
+        This function handles converting outputs from the model
+        to actions of the appropriate form for the environment.
+
+        preds: torch tensor (..., N)
+            the outputs from the model
+        """
+        if self.is_discrete:
+            probs = F.softmax(preds, dim=-1)
+            action = sample_action(probs.data)
+            return int(action.item())
+        else:
+            preds = preds.squeeze().cpu().data.numpy()
+            return preds
+
+    def close(self):
+        self.env.close()
+
 class UnityGymEnv:
     def __init__(self, env_name, prep_fxn, seed=int(time.time()),
                                            worker_id=None,
@@ -81,20 +159,24 @@ class UnityGymEnv:
         for k,v in float_params.items():
             if k=="validation" and v>=1:
                 print("Game in validation mode")
-            env_channel.set_float_parameter(k, v)
+            env_channel.set_float_parameter(k, float(v))
         if worker_id is None: worker_id = seed%500
-        try:
-            env = UnityEnvironment(file_name=path,
-                               side_channels=[channel,env_channel],
-                               worker_id=worker_id,
-                               seed=seed)
-        except:
-            worker_id = worker_id +1+ int(np.random.random()*500)
-            env = UnityEnvironment(file_name=path,
-                               side_channels=[channel,env_channel],
-                               worker_id=worker_id,
-                               seed=seed)
-            
+        env_made = False
+        n_loops = 0
+        worker_id = 0
+        while not env_made and n_loops < 50:
+            try:
+                env = UnityEnvironment(file_name=path,
+                                   side_channels=[channel,env_channel],
+                                   worker_id=worker_id,
+                                   seed=seed)
+                env_made = True
+            except:
+                print("Error encountered making environment, trying new worker_id")
+                worker_id = worker_id + 1 + int(np.random.random()*500)
+                try: env.close()
+                except: pass
+                n_loops += 1
         env = UnityToGymWrapper(env, allow_multiple_obs=True)
         return env
 
@@ -182,3 +264,12 @@ def center_zero2one(obs):
         return obs[None]
     return obs
 
+def get_env(hyps):
+    if hyps['env_name'][:4] == "gym:":
+        og_name = hyps['env_name']
+        del hyps['env_name']
+        env_name = og_name.split(":")[-1].strip()
+        env = GymEnv(env_name=env_name,**hyps)
+        hyps['env_name'] = og_name
+        return env
+    return UnityGymEnv(**hyps)

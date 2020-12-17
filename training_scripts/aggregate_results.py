@@ -23,22 +23,27 @@ if __name__ == "__main__":
         checkpts = mlio.get_checkpoints(model_folder)
         if len(checkpts) == 0: continue
         table = mlanl.get_table(mlio.load_checkpoint(checkpts[0]))
-        for checkpt in checkpts:
-            chkpt = mlio.load_checkpoint(checkpt)
+        for checkpt_path in checkpts:
+            checkpt = mlio.load_checkpoint(checkpt_path)
             for k in table.keys():
-                if k in set(chkpt.keys()):
-                    table[k].append(chkpt[k])
+                if k in set(checkpt.keys()):
+                    table[k].append(checkpt[k])
+
         df = pd.DataFrame(table)
-        params = chkpt['hyps']['float_params']
-        df['egoCentered'] =    try_key(params,'egoCentered',False)
-        df['absoluteCoords'] = try_key(params,'absoluteCoords',False)
-        df['smoothMovement'] = try_key(params,'smoothMovement',False)
-        df['restrictCamera'] = try_key(params,'restrictCamera',False)
-        df['randomizeObjs'] =  try_key(params,'randomizeObjs',False)
-        df['specGoalObjs'] =   try_key(params,'specGoalObjs',False)
-        df['obj_recog'] = try_key(chkpt['hyps'],'obj_recog',False)
-        df['seed'] = try_key(chkpt['hyps'],'seed',-1)
-        df['model_class'] = chkpt['hyps']['model_class']
+        # These keys are ignored
+        ignores = {"del_prev_sd","key_descriptions",
+                   "search_keys","float_params"}
+        for k,v in checkpt['hyps'].items():
+            # Note that any key ending with an underscore is ignored
+            if k not in ignores and k[-1] != "_":
+                try:
+                    df[k] = v
+                except:
+                    df[k] = str(v)
+        params = checkpt['hyps']['float_params']
+        for k,v in params.items():
+            df[k] = v
+
         df['model_type'] = "Unk"
         idx = (df["egoCentered"]>=1)&(df["absoluteCoords"]>=1)
         df.loc[idx,"model_type"] = "EgoAbsolute"

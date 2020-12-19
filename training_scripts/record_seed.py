@@ -75,8 +75,6 @@ with torch.no_grad():
         if len(tup)==3: pred,color,shape = tup
         else: pred,color,shape,rew_p = tup
         obs,targ,rew,done,_ = env.step(pred)
-        print("pred:", pred.cpu().data.numpy())
-        print("targ:", targ)
         sum_rew += rew
         if color is not None and len(color) > 0:
             color = torch.argmax(color[0]).item()
@@ -85,15 +83,16 @@ with torch.no_grad():
         if len(tup) > 3 and len(rew_p) > 0: rew_p = rew_p.cpu().data.tolist()
         else: rew_p = []
         disp_pred = loc + [color,shape]
-        #print("pred:", disp_pred)
-        #print("targ:", targ)
+        print("pred:", disp_pred)
+        print("targ:", targ)
+        print()
         loc_loss = F.mse_loss(pred,torch.FloatTensor(targ[:2])[None].cuda())
         #print("locL:", loc_loss.item())
         #print()
         img = obs.squeeze().permute(1,2,0).data.numpy()/3
         frames.append(np.tile(img[None],(repeat,1,1,1)))
         n_loops += 1
-        print("{:.2f}%".format(len(frames)/n_unique_frames*100), end="      \r")
+        #print("{:.2f}%".format(len(frames)/n_unique_frames*100), end="      \r")
 
 frames = np.vstack(frames)
 frames = np.uint8(frames*255/2+255/2)

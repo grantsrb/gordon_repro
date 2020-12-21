@@ -30,8 +30,11 @@ def train(rank, hyps, verbose=True):
     hyps: dict
         contains all relavent hyperparameters
     """
+    # Initialize settings
     if "randomizeObjs" in hyps:
         assert False, "you mean randomizeObs, not randomizeObjs"
+    if "audibleTargs" in hyps and hyps['audibleTargs'] > 0:
+        hyps['aud_targs'] = True
     hyps['main_path'] = try_key(hyps,'main_path',"./")
     checkpt,hyps = get_resume_checkpt(hyps,verbose=verbose) #incrs seed
     if checkpt is None:
@@ -200,10 +203,13 @@ def train(rank, hyps, verbose=True):
 
             # Make predictions
             if try_key(hyps,"use_bptt",False):
-                pred_tup = bptt(hyps,model,obsrs,hs,dones)
-                #pred_tup = bptt(hyps,model,obsrs,starts)
+                pred_tup = bptt(hyps,model,obsrs,hs,dones,obj_targs)
             else:
-                pred_tup = model(obsrs.cuda(), hs.cuda())
+                color_idx = obj_targs[:,:1]
+                shape_idx = obj_targs[:,1:2]
+                pred_tup = model(obsrs.cuda(), h=hs.cuda(),
+                                               color_idx=color_idx,
+                                               shape_idx=shape_idx)
             loc_preds,color_preds,shape_preds,rew_preds = pred_tup
 
             # Calc Losses
@@ -224,10 +230,10 @@ def train(rank, hyps, verbose=True):
             back_loss = loss / hyps['n_loss_loops']
             back_loss.backward()
 
-            avg_loss +=      loss.item()
-            avg_rew +=       rews.mean()
-            avg_loc_loss +=  loc_loss.item()
-            avg_obj_loss +=  obj_loss.item()
+            avg_loss      += loss.item()
+            avg_rew       += rews.mean()
+            avg_loc_loss  += loc_loss.item()
+            avg_obj_loss  += obj_loss.item()
             avg_color_loss+= color_loss.item()
             avg_shape_loss+= shape_loss.item()
             avg_rew_loss  += rew_loss.item()
@@ -414,6 +420,9 @@ class Runner:
         n_tsteps = hyps['n_tsteps'] if n_tsteps is None else n_tsteps
 
         self.model.reset_h(batch_size=1)
+        # Prev h will only be None if this is the first rollout of the
+        # training. If we ended on a done in the last session, the env
+        # hasn't been restarted yet. So, we can reset here.
         if self.prev_h is None or self.prev_done:
             self.prev_obs,self.prev_targ = self.env.reset()
             self.prev_rew = 0
@@ -427,7 +436,10 @@ class Runner:
         hs = [self.model.h]
         targs = [self.prev_targ]
         rews  = [self.prev_rew]
-        dones = [0]
+        dones = [0] # Will never be 1 due to reset a few lines above
+        # Easiest to mark this as a start for indexing. But means we
+        # need to be careful and use done signals in the bptt.
+        # Otherwise we'll restart the h vector when we don't want to
         starts = [1]
 
         loc_preds = []
@@ -437,7 +449,11 @@ class Runner:
 
         with torch.no_grad():
             while len(rews) < n_tsteps:
-                tup = self.model(obs[None])
+                temp = targs[-1].squeeze()[None].long()
+                color_idx=torch.LongTensor(temp[:,2:3])
+                shape_idx=torch.LongTensor(temp[:,3:4])
+                tup = self.model(obs[None], None, color_idx.cuda(),
+                                                  shape_idx.cuda())
                 pred,color_pred,shape_pred,rew_pred = tup
 
                 obs,targ,rew,done,_ = self.env.step(pred)
@@ -446,7 +462,7 @@ class Runner:
                 obs = obs.cuda()
 
                 loc_preds.append(pred)
-                if obj_recog:
+                if len(color_pred)>0:
                     color_preds.append(color_pred)
                     shape_preds.append(shape_pred)
                 if rew_recog:
@@ -461,10 +477,14 @@ class Runner:
 
                 if done>0 and len(rews)<n_tsteps:
                     # Finish out last step
-                    tup = self.model(obs[None])
+                    temp = targs[-1].squeeze()[None].long()
+                    color_idx=torch.LongTensor(temp[:,2:3])
+                    shape_idx=torch.LongTensor(temp[:,3:4])
+                    tup = self.model(obs[None], None, color_idx.cuda(),
+                                                      shape_idx.cuda())
                     pred,color_pred,shape_pred,rew_pred = tup
                     loc_preds.append(pred)
-                    if obj_recog:
+                    if len(color_pred)>0:
                         color_preds.append(color_pred)
                         shape_preds.append(shape_pred)
                     if rew_recog:
@@ -513,11 +533,14 @@ class Runner:
             self.shared_data['obj_targs'][startx:endx] = obj_targs
 
         if validation:
-            tup = self.model(obs[None])
+            color_idx = obj_targs[:,:1]
+            shape_idx = obj_targs[:,1:2]
+            tup = self.model(obs[None], None, color_idx.cuda(),
+                                                shape_idx.cuda())
             pred,color_pred,shape_pred,rew_pred = tup
             loc_preds.append(pred)
             loc_preds = torch.vstack(loc_preds)
-            if obj_recog:
+            if len(color_pred)>0:
                 color_preds.append(color_pred)
                 shape_preds.append(shape_pred)
                 color_preds = torch.vstack(color_preds)
@@ -608,7 +631,7 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
         rew_loss = torch.zeros(1).cuda()
     return loc_loss,color_loss,shape_loss,rew_loss,color_acc,shape_acc
 
-def bptt(hyps, model, obsrs, hs, starts):
+def bptt(hyps, model, obsrs, hs, dones, obj_targs):
     """
     Used to include dependencies over time. It is assumed each rollout
     is of fixed length.
@@ -620,8 +643,10 @@ def bptt(hyps, model, obsrs, hs, starts):
         MDP states at each timestep t
     hs: FloatTensor (R*N,H)
         Recurrent states at timestep t
-    starts: torch LongTensor (R*N,)
-        Binary array denoting what indices are new episodes
+    dones: torch LongTensor (R*N,)
+        Binary array denoting the indices at the end of an episode
+    obj_targs: long tensor (R*N,2)
+        the color and shape indexes
     """
     n_runs = hyps['n_runs']
     n_tsteps = hyps['n_tsteps']
@@ -629,32 +654,43 @@ def bptt(hyps, model, obsrs, hs, starts):
     assert len(obsrs) == b_size
 
     obsrs = obsrs.reshape(n_runs,n_tsteps,*obsrs.shape[1:])
-    starts = starts.reshape(n_runs,n_tsteps,1)
-    resets = 1-starts
+    dones = dones.reshape(n_runs,n_tsteps,1)
+    resets = 1-dones
     h_inits = model.reset_h(batch_size=n_runs)
     model.h = hs.reshape(n_runs,n_tsteps,-1)[:,0]
+    color_idxs = obj_targs[:,:1].reshape(n_runs,n_tsteps,1)
+    shape_idxs = obj_targs[:,1:].reshape(n_runs,n_tsteps,1)
     loc_preds = []
     color_preds = []
     shape_preds = []
     rew_preds = []
+    h = model.h
     for i in range(n_tsteps):
         obs = obsrs[:,i]
-        h = model.h
-        #h = h*resets[:,i].data+h_inits.data*starts[:,i].data
-        if starts[:,i].sum() > 0:
-            new_hs = []
-            for j in range(len(starts)):
-                new_h = h[j] if starts[j,i] < 1 else h_inits[j].data
-                new_hs.append(new_h)
-            h = torch.stack(new_hs)
-        loc_pred,color_pred,shape_pred,rew_pred = model(obs,h)
+        color_idx = color_idxs[:,i]
+        shape_idx = shape_idxs[:,i]
+        loc_pred,color_pred,shape_pred,rew_pred = model(obs, h,
+                                                        color_idx,
+                                                        shape_idx)
         loc_preds.append(loc_pred)
         color_preds.append(color_pred)
         shape_preds.append(shape_pred)
         rew_preds.append(rew_pred)
+        # Might be tempting to use starts here, BUT DON"T DO IT
+        # The start indices are unreliable due to being used as markers
+        # for the start of recording an episode, not necessarily the
+        # real start of a new episode
+        h = model.h
+        if dones[:,i].sum() > 0:
+            #h = h*resets[:,i].data+h_inits.data*dones[:,i].data
+            new_hs = []
+            for j in range(len(dones)):
+                new_h = h[j] if dones[j,i] < 1 else h_inits[j].data
+                new_hs.append(new_h)
+            h = torch.stack(new_hs)
     shape = (b_size, loc_pred.shape[-1])
     loc_preds = torch.stack(loc_preds,dim=1).reshape(shape)
-    if model.obj_recog:
+    if model.obj_recog and not model.aud_targs:
         shape = (b_size,color_pred.shape[-1])
         color_preds = torch.stack(color_preds,dim=1).reshape(shape)
         shape = (b_size,shape_pred.shape[-1])

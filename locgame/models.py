@@ -97,16 +97,29 @@ class TransformerLocator(LocatorBase):
 
 class RNNLocator(LocatorBase):
     def __init__(self, cnn_type="SimpleCNN", rnn_type="GRUCell",
+                                             aud_targs=False,
+                                             fixed_h=False,
                                              **kwargs):
         """
         cnn_type: str
             the class of cnn to use for creating features from the image
         rnn_type: str
             the class of rnn to use for the temporal model
+        aud_targs: bool
+            if true, a color and shape must be specified at each step. 
+            This creates two separate embeddings that are concatenated
+            to the hidden state and projected down into the appropriate
+            size for feature extraction and for the rnn. Stands for 
+            audible targs
+        fixed_h: bool
+            if true, the h value is reset at each step in the episode
         """
         super().__init__(**kwargs)
         self.cnn_type = cnn_type
         self.rnn_type = rnn_type
+        self.aud_targs = aud_targs
+        self.fixed_h = fixed_h
+        if self.fixed_h: print("USING FIXED H VECTOR!!")
         self.cnn = globals()[self.cnn_type](**kwargs)
         self.pos_encoder = PositionalEncoder(self.cnn.seq_len,
                                              self.emb_size)
@@ -126,6 +139,12 @@ class RNNLocator(LocatorBase):
         self.h_init = torch.randn(self.h_shape)
         divisor = float(np.sqrt(self.emb_size))
         self.h_init = nn.Parameter(self.h_init/divisor)
+
+        if self.aud_targs:
+            self.color_embs = nn.Embedding(N_COLORS, self.emb_size)
+            self.shape_embs = nn.Embedding(N_SHAPES, self.emb_size)
+            self.aud_projection = nn.Linear(3*self.emb_size,
+                                            self.emb_size)
 
         self.rnn = getattr(nn,self.rnn_type)(input_size=self.emb_size,
                                              hidden_size=self.emb_size)
@@ -167,18 +186,28 @@ class RNNLocator(LocatorBase):
         self.h = self.h_init.repeat(batch_size,1)
         return self.h
 
-    def forward(self, x, h=None):
+    def forward(self, x, h=None, color_idx=None, shape_idx=None):
         """
         x: torch float tensor (B,C,H,W)
+        h: optional float tensor (B,E)
+        color_idx: long tensor (B,1)
+        shape_idx: long tensor (B,1)
         """
         if h is None:
             h = self.h
+        if self.aud_targs: # Create new h if conditional predictions
+            color_emb = self.color_emb(color_idx)
+            shape_emb = self.shape_emb(shape_idx)
+            h = torch.cat([h,color_emb,shape_emb],axis=1)
+            h = self.aud_projection(h)
         feats = self.cnn(x)
         feats = self.pos_encoder(feats)
+        if self.fixed_h:
+            h = self.reset_h(len(x))
         feat = self.extractor(h.unsqueeze(1), feats)
         h = self.rnn(feat.mean(1),h)
         loc = self.locator(h)
-        if self.obj_recog:
+        if self.obj_recog and not self.aud_targs:
             color = self.color(h)
             shape = self.shape(h)
         else:

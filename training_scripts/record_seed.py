@@ -67,11 +67,13 @@ frames = []
 with torch.no_grad():
     while len(frames) < n_unique_frames:
         if done:
-            obs,_ = env.reset()
+            obs,targ = env.reset()
             model.reset_h()
             img = obs.squeeze().permute(1,2,0).data.numpy()/3
             frames.append(np.tile(img[None],(repeat,1,1,1)))
-        tup = model(obs[None].to(DEVICE))
+        tup = model(obs[None].to(DEVICE), None,
+                    targ[2:3].long()[None].cuda(),
+                    targ[3:].long()[None].cuda())
         if len(tup)==3: pred,color,shape = tup
         else: pred,color,shape,rew_p = tup
         obs,targ,rew,done,_ = env.step(pred)
@@ -80,8 +82,10 @@ with torch.no_grad():
             color = torch.argmax(color[0]).item()
             shape = torch.argmax(shape[0]).item()
         loc = pred.squeeze().cpu().data.tolist()
-        if len(tup) > 3 and len(rew_p) > 0: rew_p = rew_p.cpu().data.tolist()
-        else: rew_p = []
+        if len(tup) > 3 and len(rew_p) > 0:
+            rew_p = rew_p.cpu().data.tolist()
+        else:
+            rew_p = []
         disp_pred = loc + [color,shape]
         print("pred:", disp_pred)
         print("targ:", targ)

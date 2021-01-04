@@ -19,7 +19,7 @@ To use this script, argue a model folder or checkpt to be examined
 $ python3 watch_model.py <path_to_model>
 """
 
-env_name = "~/loc_games/LocationGame2dLinux_5/LocationGame2dLinux.x86_64"
+env_name = None
 
 checkpt = io.load_checkpoint(sys.argv[1])
 hyps = checkpt['hyps']
@@ -41,13 +41,17 @@ model.load_state_dict(checkpt["state_dict"])
 done = True
 obs = None
 model.eval()
+print(model.aud_targs)
 sum_rew = 0
 n_loops = 0
 with torch.no_grad():
     while True:
         if done:
             if obs is not None:
-                pred,color,shape,rew_pred = model(obs[None].to(DEVICE))
+                pred,color,shape,rew_pred = model(obs[None].to(DEVICE),
+                                        None,
+                                        targ[2:3].long()[None].cuda(),
+                                        targ[3:].long()[None].cuda())
                 if len(color) > 0:
                     color = torch.argmax(color[0]).item()
                     shape = torch.argmax(shape[0]).item()
@@ -55,7 +59,8 @@ with torch.no_grad():
                 disp_pred = loc + [color,shape]
                 print("ending pred:", disp_pred)
                 print("ending targ:", targ)
-                loc_loss = F.mse_loss(pred,torch.FloatTensor(targ[:2])[None].cuda())
+                loc_loss = F.mse_loss(pred,
+                             torch.FloatTensor(targ[:2])[None].cuda())
                 print("ending locL:", loc_loss.item())
                 print()
             obs,targ = env.reset()
@@ -64,7 +69,10 @@ with torch.no_grad():
             plt.show()
             if n_loops > 0:
                 print("Running Mean Rew:", sum_rew/n_loops)
-        pred,color,shape,rew_pred = model(obs[None].to(DEVICE))
+        pred,color,shape,rew_pred = model(obs[None].to(DEVICE),
+                                        None,
+                                        targ[2:3].long()[None].cuda(),
+                                        targ[3:].long()[None].cuda())
         obs,targ,rew,done,_ = env.step(pred)
         sum_rew += rew
         if len(color) > 0:

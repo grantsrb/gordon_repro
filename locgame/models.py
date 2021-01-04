@@ -166,7 +166,7 @@ class RNNLocator(LocatorBase):
             nn.Linear(self.class_h_size, 1)
         )
         # Obj recognition model
-        if self.obj_recog:
+        if self.obj_recog and not self.aud_targs:
             self.color = nn.Sequential(
                 nn.LayerNorm(self.emb_size),
                 nn.Linear(self.emb_size, self.class_h_size),
@@ -183,6 +183,9 @@ class RNNLocator(LocatorBase):
             )
 
     def reset_h(self, batch_size=1):
+        """
+        returns an h that is of shape (B,E)
+        """
         self.h = self.h_init.repeat(batch_size,1)
         return self.h
 
@@ -196,9 +199,11 @@ class RNNLocator(LocatorBase):
         if h is None:
             h = self.h
         if self.aud_targs: # Create new h if conditional predictions
-            color_emb = self.color_emb(color_idx)
-            shape_emb = self.shape_emb(shape_idx)
-            h = torch.cat([h,color_emb,shape_emb],axis=1)
+            color_emb=self.color_embs(color_idx)
+            shape_emb=self.shape_embs(shape_idx)
+            h = torch.cat([h, color_emb.reshape(-1,self.emb_size),
+                              shape_emb.reshape(-1,self.emb_size)],
+                              axis=-1)
             h = self.aud_projection(h)
         feats = self.cnn(x)
         feats = self.pos_encoder(feats)

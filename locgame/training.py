@@ -19,6 +19,7 @@ from ml_utils.utils import try_key
 import locgame.models as models
 import locgame.environments as environments
 import matplotlib.pyplot as plt
+from datetime import datetime
 
 if torch.cuda.is_available():
     DEVICE = torch.device("cuda:0")
@@ -35,6 +36,7 @@ def train(rank, hyps, verbose=True):
         assert False, "you mean randomizeObs, not randomizeObjs"
     if "audibleTargs" in hyps and hyps['audibleTargs'] > 0:
         hyps['aud_targs'] = True
+        if verbose: print("Using audible targs!")
     hyps['main_path'] = try_key(hyps,'main_path',"./")
     checkpt,hyps = get_resume_checkpt(hyps,verbose=verbose) #incrs seed
     if checkpt is None:
@@ -333,6 +335,9 @@ def train(rank, hyps, verbose=True):
         stats_string = s + stats_string
         log_file = os.path.join(hyps['save_folder'],"training_log.txt")
         with open(log_file,'a') as f:
+            if epoch==0:
+                dt_string = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                f.write(dt_string+"\n\n")
             f.write(str(stats_string)+'\n')
     del save_dict['state_dict']
     del save_dict['optim_dict']
@@ -533,8 +538,8 @@ class Runner:
             self.shared_data['obj_targs'][startx:endx] = obj_targs
 
         if validation:
-            color_idx = obj_targs[:,:1]
-            shape_idx = obj_targs[:,1:2]
+            color_idx = obj_targs[-1:,:1]
+            shape_idx = obj_targs[-1:,1:2]
             tup = self.model(obs[None], None, color_idx.cuda(),
                                                 shape_idx.cuda())
             pred,color_pred,shape_pred,rew_pred = tup

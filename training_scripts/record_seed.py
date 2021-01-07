@@ -71,9 +71,12 @@ with torch.no_grad():
             model.reset_h()
             img = obs.squeeze().permute(1,2,0).data.numpy()/3
             frames.append(np.tile(img[None],(repeat,1,1,1)))
+        if len(targ) > 4: num_idx = targ[4:5].long()[None].cuda()
+        else: num_idx = None
         tup = model(obs[None].to(DEVICE), None,
                     targ[2:3].long()[None].cuda(),
-                    targ[3:].long()[None].cuda())
+                    targ[3:4].long()[None].cuda(),
+                    num_idx)
         if len(tup)==3: pred,color,shape = tup
         else: pred,color,shape,rew_p = tup
         obs,targ,rew,done,_ = env.step(pred)

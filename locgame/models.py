@@ -51,7 +51,7 @@ class RSSM(nn.Module, CustomModule):
         self.min_sigma = min_sigma
 
         self.rnn = getattr(nn, rnn_type)(input_size=(s_size+a_size),
-                                    hidden_size=h_size) # Dynamics rnn
+                                         hidden_size=h_size)
         # Creates mu and sigma for state gaussian
         self.state_layer = nn.Linear(h_size, 2*s_size) 
 
@@ -209,7 +209,7 @@ class RNNLocator(LocatorBase):
         emb_count = 1
         if self.count_out:
             emb_count += 1
-            self.number_embs =nn.Embedding(self.n_numbers,self.emb_size)
+            self.count_embs =nn.Embedding(self.n_numbers,self.emb_size)
         if self.aud_targs:
             emb_count += 2
             self.color_embs = nn.Embedding(self.n_colors,self.emb_size)
@@ -263,13 +263,13 @@ class RNNLocator(LocatorBase):
 
     def forward(self, x, h=None, color_idx=None,
                                  shape_idx=None,
-                                 number_idx=None):
+                                 count_idx=None):
         """
         x: torch float tensor (B,C,H,W)
         h: optional float tensor (B,E)
-        color_idx: long tensor (B,1)
-        shape_idx: long tensor (B,1)
-        number_idx: long tensor (B,1)
+        color_idx: long tensor (B,)
+        shape_idx: long tensor (B,)
+        count_idx: long tensor (B,)
         """
         if h is None:
             h = self.h
@@ -277,8 +277,8 @@ class RNNLocator(LocatorBase):
             h = self.reset_h(len(x))
         cat_arr = [h]
         if self.count_out:
-            number_emb = self.number_embs(number_idx)
-            cat_arr.append(number_emb.reshape(-1,self.emb_size))
+            count_emb = self.count_embs(count_idx)
+            cat_arr.append(count_emb.reshape(-1,self.emb_size))
         if self.aud_targs: # Create new h if conditional predictions
             color_emb = self.color_embs(color_idx)
             cat_arr.append(color_emb.reshape(-1,self.emb_size))
@@ -586,8 +586,8 @@ class RNNFwdDynamics(LocatorBase):
         self.aud_targs = aud_targs
         self.fixed_h = fixed_h
         if self.fixed_h: print("USING FIXED H VECTOR!!")
-        self.cnn = globals()[self.cnn_type](**kwargs)
         self.deconv = globals()[self.deconv_type](**kwargs)
+        self.cnn = globals()[self.cnn_type](**kwargs)
         self.pos_encoder = PositionalEncoder(self.cnn.seq_len,
                                              self.emb_size)
         self.extractor = Attncoder(1, emb_size=self.emb_size,
@@ -600,14 +600,9 @@ class RNNFwdDynamics(LocatorBase):
                                  gen_decs=False,
                                  prob_embs=self.prob_embs,
                                  prob_attn=self.prob_attn)
-        self.number_embs = nn.Embedding(self.n_numbers, self.emb_size)
-        emb_count = 2
-        if self.aud_targs:
-            self.color_embs = nn.Embedding(self.n_colors, self.emb_size)
-            self.shape_embs = nn.Embedding(self.n_shapes, self.emb_size)
-            emb_count = 4
-        self.h_projection = nn.Linear(emb_count*self.emb_size,
-                                      self.emb_size)
+        self.encoder = MuSig(h_size=self.emb_size,
+                             feat_size=self.emb_size,
+                             s_size=self.emb_size)
 
         # Learned initialization for rnn hidden vector
         self.h_shape = (1,self.emb_size)
@@ -615,8 +610,16 @@ class RNNFwdDynamics(LocatorBase):
         divisor = float(np.sqrt(self.emb_size))
         self.h_init = nn.Parameter(self.h_init/divisor)
 
-        self.rnn = getattr(nn,self.rnn_type)(input_size=self.emb_size,
-                                             hidden_size=self.emb_size)
+        self.count_embs = nn.Embedding(self.n_numbers, self.emb_size)
+        a_size = self.emb_size
+        if self.aud_targs:
+            self.color_embs = nn.Embedding(self.n_colors, self.emb_size)
+            self.shape_embs = nn.Embedding(self.n_shapes, self.emb_size)
+            a_size = 3*self.emb_size
+        self.rssm = RSSM(h_size=self.emb_size,
+                         s_size=self.emb_size,
+                         a_size=a_size,
+                         rnn_type=self.rnn_type)
 
     def reset_h(self, batch_size=1):
         """
@@ -627,35 +630,94 @@ class RNNFwdDynamics(LocatorBase):
 
     def forward(self, x, h=None, color_idx=None,
                                  shape_idx=None,
-                                 number_idx=None):
+                                 count_idx=None,
+                                 mu=None,
+                                 sigma=None):
         """
         x: torch float tensor (B,C,H,W)
         h: optional float tensor (B,E)
         color_idx: long tensor (B,1)
         shape_idx: long tensor (B,1)
-        number_idx: long tensor (B,1)
+        count_idx: long tensor (B,1)
+        mu: float tensor (B,E), optional
+            if this is not none, x must be none and sigma must be not
+            none
+        sigma: float tensor (B,E), optional
+            if this is not none, x must be none and mu must be not
+            none
         """
-        assert number_idx is not None, "Must have number index"
+        assert count_idx is not None, "Must have count index"
+        assert x is None or (mu is None and sigma is None)
         if h is None:
             h = self.h
         if self.fixed_h:
             h = self.reset_h(len(x))
-        feats = self.cnn(x)
-        feats = self.pos_encoder(feats)
-        number_emb = self.number_embs(number_idx)
-        cat_arr = [h,number_emb.reshape(-1,self.emb_size)]
-        if self.aud_targs: # Create new h if conditional predictions
-            color_emb=self.color_embs(color_idx)
+
+        if x is not None:
+            feats = self.cnn(x)
+            feats = self.pos_encoder(feats)
+            feat = self.extractor(h.unsqueeze(1), feats).mean(1)
+            mu, sigma = self.encoder(h,feat)
+
+        count_emb = self.count_embs(count_idx)
+        emb = count_emb.reshape(-1,self.emb_size)
+        if self.aud_targs:
+            cat_arr = [emb]
+            color_emb = self.color_embs(color_idx)
             cat_arr.append(color_emb.reshape(-1,self.emb_size))
-            shape_emb=self.shape_embs(shape_idx)
+            shape_emb = self.shape_embs(shape_idx)
             cat_arr.append(shape_emb.reshape(-1,self.emb_size))
-        h = torch.cat(cat_arr, axis=-1)
-        h = self.h_projection(h)
-        feat = self.extractor(h.unsqueeze(1), feats)
-        h = self.rnn(feat.mean(1),h)
+            emb = torch.cat(cat_arr, axis=-1)
+        s = sample_s(mu, sigma)
+        h,pred_mu,pred_sigma = self.rssm(h,s,emb)
         self.h = h
-        pred = self.deconv(h)
-        return torch.sigmoid(pred) # (B,C,H,W)
+        return h,mu,sigma,pred_mu,pred_sigma
+
+    def decode(self, s):
+        """
+        s: float tensor (B,E)
+        """
+        return self.deconv(s) # (B,C,H,W)
+
+class MuSig(nn.Module, CustomModule):
+    """
+    A simple class to assist in creating state vectors for the rssm
+    """
+    def __init__(self, h_size, feat_size, s_size):
+        """
+        h_size: int
+            size of h_vector
+        feat_size: int
+            size of feature vector
+        s_size: int
+            size of the state vector
+        """
+        super().__init__()
+        self.h_size = h_size
+        self.feat_size = feat_size
+        self.projection = nn.Linear(self.h_size + self.feat_size, s_size)
+
+    def forward(self, h, feat):
+        """
+        h: torch float tensor (B,H)
+        feat: torch float tensor (B,F)
+        """
+        inpt = torch.cat([h,feat],dim=-1)
+        musigma = self.projection(inpt)
+        mu, sigma = torch.chunk(musigma, 2, dim=-1)
+        sigma = F.softplus(sigma) + self.min_sigma
+        return mu, sigma
+
+def sample_s(mu,sigma):
+    """
+    A simple helper function to sample a gaussian
+
+    mu: float tensor (..., N)
+        the means of the gaussian
+    sigma: float tensor (..., N)
+        the standard deviations of the gaussian
+    """
+    return mu + sigma*torch.randn_like(sigma)
 
 class PooledRNNFwdDynamics(RNNFwdDynamics):
     def __init__(self,**kwargs):

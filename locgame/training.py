@@ -60,6 +60,7 @@ def train(rank, hyps, verbose=True):
         hyps['save_folder'] = get_save_folder(hyps)
     if not os.path.exists(hyps['save_folder']):
         os.mkdir(hyps['save_folder'])
+    print("Saving to", hyps['save_folder'])
     hyps = get_game_variables(hyps)
     # Set manual seed
     hyps['seed'] = try_key(hyps,'seed', int(time.time()))
@@ -128,18 +129,21 @@ def train(rank, hyps, verbose=True):
     # The total number of steps included in the update
     hyps['batch_size'] = hyps['n_tsteps']*hyps['n_runs']
     shared_data = {
-            'rews': torch.zeros(hyps['batch_size']),
-            "hs":torch.zeros(hyps['batch_size'],model.h_shape[-1]),
-            "starts":torch.zeros(hyps['batch_size']).long(),
-            "dones":torch.zeros(hyps['batch_size']).long(),
-            "loc_targs":torch.zeros(hyps['batch_size'],2),
-            "obj_targs":torch.zeros(hyps['batch_size'],2).long(),
-            "reset_fwd_hs":torch.zeros(hyps['batch_size']).long(),
-            "counts":torch.zeros(hyps['batch_size'],1).long()
+            'obsrs':     torch.zeros(hyps['batch_size'],*env.shape),
+            'rews':      torch.zeros(hyps['batch_size']),
+            "hs":   torch.zeros(hyps['batch_size'],model.h_shape[-1]),
+            "loc_targs": torch.zeros(hyps['batch_size'],2),
+            "count_idxs":torch.zeros(hyps['batch_size']).long(),
+            "longs":     torch.zeros(hyps['batch_size'],5).long(),
+            #"color_idxs": idx 0
+            #"shape_idxs": idx 1
+            #"starts":     idx 2
+            #"dones":      idx 3
+            #"resets":     idx 4
             }
-    shared_data = {k:v.share_memory_().cuda() for k,v in\
-                                     shared_data.items()}
-    shared_data['obsrs'] = torch.zeros(hyps['batch_size'],*env.shape)
+    shared_data = {k:v.share_memory_() for k,v in shared_data.items()}
+    shared_data = {k:v.cuda() for k,v in shared_data.items()}
+    shared_data['obsrs'] = shared_data['obsrs'].cpu()
 
     gate_q = mp.Queue(hyps['n_runs'])
     stop_q = mp.Queue(hyps['n_runs'])
@@ -235,26 +239,30 @@ def train(rank, hyps, verbose=True):
             # Collect data from runners
             rews = shared_data['rews']
             hs = shared_data['hs']
-            dones = shared_data['dones']
-            starts = shared_data['starts']
             obsrs = shared_data['obsrs']
             loc_targs = shared_data['loc_targs']
-            obj_targs = shared_data['obj_targs']
-            counts = shared_data['counts']
-            reset_fwd_hs = shared_data['reset_fwd_hs']
-            color_targs,shape_targs = obj_targs[:,0],obj_targs[:,1]
+            count_idxs = shared_data['count_idxs']
+            #"color_idxs": idx 0
+            #"shape_idxs": idx 1
+            #"starts":     idx 2
+            #"dones":      idx 3
+            #"resets":     idx 4
+            color_idxs = shared_data['longs'][:,0]
+            shape_idxs = shared_data['longs'][:,1]
+            starts =     shared_data['longs'][:,2]
+            dones =      shared_data['longs'][:,3]
+            resets =     shared_data['longs'][:,4]
 
             # Make predictions
             if try_key(hyps,"use_bptt",False):
-                pred_tup = bptt(hyps,model,obsrs,hs,dones,obj_targs,
-                                                          counts)
+                pred_tup = bptt(hyps,model,obsrs,hs,dones,color_idxs,
+                                                          shape_idxs,
+                                                          count_idxs)
             else:
-                color_idx = obj_targs[:,:1]
-                shape_idx = obj_targs[:,1:2]
                 pred_tup = model(obsrs.cuda(), h=hs.cuda(),
-                                               color_idx=color_idx,
-                                               shape_idx=shape_idx,
-                                               number_idx=counts)
+                                               color_idx=color_idxs,
+                                               shape_idx=shape_idxs,
+                                               count_idx=count_idxs)
             loc_preds,color_preds,shape_preds,rew_preds = pred_tup
 
             # Calc Losses
@@ -262,10 +270,10 @@ def train(rank, hyps, verbose=True):
             post_rew_preds = try_key(hyps,'post_rew_preds',False)
             loss_tup = calc_losses(
                          loc_preds,color_preds,shape_preds, rew_preds,
-                         loc_targs,color_targs,shape_targs, rews,
+                         loc_targs,color_idxs,shape_idxs, rews,
                          starts,dones, post_obj_preds=post_obj_preds,
                          post_rew_preds=post_rew_preds,
-                         hyps=hyps, firsts=reset_fwd_hs)
+                         hyps=hyps, firsts=resets)
             loc_loss,color_loss,shape_loss,rew_loss = loss_tup[:4]
             color_acc,shape_acc = loss_tup[4:6]
             first_loc_loss,first_color_loss=loss_tup[6:8]
@@ -281,16 +289,16 @@ def train(rank, hyps, verbose=True):
             back_loss = loss / hyps['n_loss_loops']
             back_loss.backward()
 
-            avg_loss      += loss.item()
-            avg_rew       += rews.mean()
-            avg_loc_loss  += loc_loss.item()
-            avg_obj_loss  += obj_loss.item()
-            avg_color_loss+= color_loss.item()
-            avg_shape_loss+= shape_loss.item()
-            avg_rew_loss  += rew_loss.item()
-            avg_color_acc += color_acc.item()
-            avg_shape_acc += shape_acc.item()
-            avg_obj_acc   += obj_acc.item()
+            avg_loss            += loss.item()
+            avg_rew             += rews.mean()
+            avg_loc_loss        += loc_loss.item()
+            avg_obj_loss        += obj_loss.item()
+            avg_color_loss      += color_loss.item()
+            avg_shape_loss      += shape_loss.item()
+            avg_rew_loss        += rew_loss.item()
+            avg_color_acc       += color_acc.item()
+            avg_shape_acc       += shape_acc.item()
+            avg_obj_acc         += obj_acc.item()
             first_avg_loc_loss  += first_loc_loss.item()
             first_avg_obj_loss  += first_obj_loss.item()
             first_avg_color_loss+= first_color_loss.item()
@@ -307,18 +315,10 @@ def train(rank, hyps, verbose=True):
             # Fwd dynamics loss
             s = ""
             if fwd_dynamics:
-                preds,fwd_hs = fwd_preds(hyps, fwd_model,
-                                               obsrs=obsrs,
-                                               hs=fwd_hs,
-                                               resets=reset_fwd_hs,
-                                               obj_targs=obj_targs,
-                                               counts=counts)
-                fwd_loss = calc_fwd_loss(preds,obsrs,starts,dones)
-                fwd_loss = fwd_loss / hyps['n_loss_loops']
-                fwd_loss.backward()
-                if rollout % hyps['n_loss_loops'] == 0:
-                    fwd_optim.step()
-                    fwd_optim.zero_grad()
+                expr_replay.add_data(shared_data)
+                fwd_loss = fwd_train_loop(hyps, fwd_model, fwd_optim,
+                                                           expr_replay)
+
                 avg_fwd_loss += fwd_loss.item()
                 s = "Fwd: {:.5f} | ".format(fwd_loss.item())
 
@@ -502,8 +502,16 @@ class Runner:
             dict of hyperparams
         shared_data: dict of shared tensors
             keys: str
-                obsrs: shared_tensors
-                targs: shared_tensors
+                'rews':      shared tensor
+                "hs":        shared tensor
+                "loc_targs": shared tensor
+                "count_idxs": shared tensor
+                "longs": shared tensor
+                    #"color_idxs": idx 0
+                    #"shape_idxs": idx 1
+                    #"starts":     idx 2
+                    #"dones":      idx 3
+                    #"resets":     idx 4
         gate_q: multi processing Queue
             a signalling q for collection
         stop_q: multi processing Queue
@@ -575,10 +583,10 @@ class Runner:
             self.prev_rew = 0
             self.prev_done = 0
             self.prev_start = 1
-            reset_fwd_hs = [1]
+            resets = [1]
         else:
             self.model.h = self.prev_h
-            reset_fwd_hs = [0]
+            resets = [0]
         obs = self.prev_obs.cuda()
 
         obsrs = [obs]
@@ -602,12 +610,12 @@ class Runner:
                 color_idx=torch.LongTensor(temp[:,2:3])
                 shape_idx=torch.LongTensor(temp[:,3:4])
                 if temp.shape[1]>=5:
-                    number_idx = torch.LongTensor(temp[:,4:5]).cuda()
+                    count_idx = torch.LongTensor(temp[:,4:5]).cuda()
                 else:
-                    number_idx = None
+                    count_idx = None
                 tup = self.model(obs[None], None, color_idx.cuda(),
                                                   shape_idx.cuda(),
-                                                  number_idx)
+                                                  count_idx)
                 pred,color_pred,shape_pred,rew_pred = tup
 
                 obs,targ,rew,done,_ = self.env.step(pred)
@@ -624,7 +632,7 @@ class Runner:
 
                 obsrs.append(obs)
                 hs.append(self.model.h)
-                reset_fwd_hs.append(0)
+                resets.append(0)
                 targs.append(targ)
                 rews.append(rew)
                 starts.append(start)
@@ -636,12 +644,12 @@ class Runner:
                     color_idx=torch.LongTensor(temp[:,2:3])
                     shape_idx=torch.LongTensor(temp[:,3:4])
                     if temp.shape[1]>=5:
-                        number_idx = torch.LongTensor(temp[:,4:5]).cuda()
+                        count_idx = torch.LongTensor(temp[:,4:5]).cuda()
                     else:
-                        number_idx = None
+                        count_idx = None
                     tup = self.model(obs[None], None, color_idx.cuda(),
                                                       shape_idx.cuda(),
-                                                      number_idx)
+                                                      count_idx)
                     pred,color_pred,shape_pred,rew_pred = tup
                     loc_preds.append(pred)
                     if len(color_pred)>0:
@@ -659,7 +667,7 @@ class Runner:
 
                     obsrs.append(obs)
                     hs.append(self.model.h)
-                    reset_fwd_hs.append(1)
+                    resets.append(1)
                     targs.append(targ)
                     rews.append(rew)
                     starts.append(start)
@@ -679,36 +687,45 @@ class Runner:
         starts = torch.LongTensor(starts).cuda()
         obsrs = torch.stack(obsrs)
         targs = torch.stack(targs).cuda()
-        reset_fwd_hs = torch.LongTensor(reset_fwd_hs).cuda()
-        loc_targs,obj_targs = targs[:,:2],targs[:,2:4].long()
-        counts = None
+        resets = torch.LongTensor(resets).cuda()
+        loc_targs = targs[:,:2]
+        color_idxs,shape_idxs = targs[:,2].long(), targs[:,3].long()
+        count_idxs = None
         if targs.shape[1] > 4:
-            counts = targs[:,4:5].long()
+            count_idxs = targs[:,4].long()
 
         if not validation:
+            #"color_idxs": idx 0
+            #"shape_idxs": idx 1
+            #"starts":     idx 2
+            #"dones":      idx 3
+            #"resets":     idx 4
+            cat_arr = [color_idxs,
+                       shape_idxs,
+                       starts,
+                       dones,
+                       resets]
+            longs = torch.stack(cat_arr,dim=1)
             # Send data to main proc
             startx = idx*n_tsteps
             endx = (idx+1)*n_tsteps
             self.shared_data['rews'][startx:endx] = rews
             self.shared_data['hs'][startx:endx] = hs
-            self.shared_data['dones'][startx:endx] = dones
-            self.shared_data['starts'][startx:endx] = starts
             self.shared_data['obsrs'][startx:endx] = obsrs
             self.shared_data['loc_targs'][startx:endx] = loc_targs
-            self.shared_data['obj_targs'][startx:endx] = obj_targs
-            self.shared_data['reset_fwd_hs'][startx:endx] = reset_fwd_hs
-            if counts is not None:
-                self.shared_data['counts'][startx:endx] = counts
+            self.shared_data['longs'][startx:endx] = longs
+            if count_idxs is not None:
+                self.shared_data['count_idxs'][startx:endx] = count_idxs
 
         if validation:
-            color_idx = obj_targs[-1:,:1]
-            shape_idx = obj_targs[-1:,1:2]
-            number_idx = None
-            if counts is not None:
-                number_idx = counts[-1:].cuda()
+            color_idx = color_idxs[-1:]
+            shape_idx = shape_idxs[-1:]
+            count_idx = None
+            if count_idxs is not None:
+                count_idx = count_idxs[-1:].cuda()
             tup = self.model(obs[None], None, color_idx.cuda(),
                                               shape_idx.cuda(),
-                                              number_idx)
+                                              count_idx)
             pred,color_pred,shape_pred,rew_pred = tup
             loc_preds.append(pred)
             loc_preds = torch.vstack(loc_preds)
@@ -721,14 +738,15 @@ class Runner:
                 rew_preds.append(rew_pred)
                 rew_preds = torch.vstack(rew_preds)
 
-            color_targs,shape_targs = obj_targs[:,0],obj_targs[:,1]
-
-            loss_tup = calc_losses(
-                            loc_preds,color_preds,shape_preds,rew_preds,
-                            loc_targs,color_targs,shape_targs,rews,
-                            starts,dones,
-                            post_obj_preds=post_obj_preds,
-                            post_rew_preds=post_rew_preds)
+            loss_tup = calc_losses(loc_preds,color_preds,
+                                   shape_preds,rew_preds,
+                                   loc_targs,color_idxs,
+                                   shape_idxs, rews,
+                                   starts,dones,
+                                   post_obj_preds=post_obj_preds,
+                                   post_rew_preds=post_rew_preds,
+                                   hyps=self.hyps,
+                                   firsts=resets)
             loc_loss,color_loss,shape_loss,rew_loss = loss_tup[:4]
             color_acc,shape_acc = loss_tup[4:6]
             first_loc_loss,first_color_loss = loss_tup[6:8]
@@ -740,9 +758,10 @@ class Runner:
                 preds,self.fwd_hs = fwd_preds(hyps,fwd_model,
                                           obsrs=obsrs,
                                           hs=self.fwd_hs,
-                                          resets=reset_fwd_hs,
-                                          obj_targs=obj_targs,
-                                          counts=counts)
+                                          resets=resets,
+                                          color_idxs=color_idxs,
+                                          shape_idxs=shape_idxs,
+                                          count_idxs=count_idxs)
                 fwd_loss = calc_fwd_loss(preds,obsrs,starts,dones)
 
             return loc_loss,color_loss,shape_loss,rew_loss,\
@@ -792,9 +811,13 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
     loc_loss = 10*F.mse_loss(l_preds.cuda(), l_targs.cuda())
     if firsts is not None:
         assert hyps is not None, "if using firsts, must argue hyps"
+        # Case of validation
         n_runs = hyps['n_runs']
         n_tsteps = hyps['n_tsteps']
         b_size = n_runs*n_tsteps
+        if len(d_idxs) != b_size:
+            n_runs = 1
+            n_tsteps = len(d_idxs)
         firsts = firsts.reshape(n_runs,n_tsteps).clone()
         firsts[:,-1] = 0 # don't care about ending firsts
         firsts = firsts.reshape(-1)
@@ -810,10 +833,10 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
         idxs = d_idxs
         if post_obj_preds:
             idxs = s_idxs
-        c_preds = color_preds[idxs]
-        s_preds = shape_preds[idxs]
-        c_targs = color_targs[s_idxs]
-        s_targs = shape_targs[s_idxs]
+        c_preds = color_preds[idxs].squeeze()
+        s_preds = shape_preds[idxs].squeeze()
+        c_targs = color_targs[s_idxs].squeeze()
+        s_targs = shape_targs[s_idxs].squeeze()
 
         color_loss = F.cross_entropy(c_preds, c_targs)
         shape_loss = F.cross_entropy(s_preds, s_targs)
@@ -824,29 +847,35 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
             shape_acc = (maxes==s_targs).float().mean()
         if firsts is not None:
             with torch.no_grad():
-                c_preds = color_preds[firsts]
-                s_preds = shape_preds[firsts]
+                c_preds = color_preds[firsts].squeeze()
+                s_preds = shape_preds[firsts].squeeze()
                 if post_obj_preds:
-                    c_targs = color_targs[roll]
-                    s_targs = shape_targs[roll]
+                    c_targs = color_targs[roll].squeeze()
+                    s_targs = shape_targs[roll].squeeze()
                 else:
-                    c_targs = color_targs[firsts]
-                    s_targs = shape_targs[firsts]
-                first_color_loss = F.cross_entropy(c_preds,c_targs)
-                first_shape_loss = F.cross_entropy(s_preds,s_targs)
+                    c_targs = color_targs[firsts].squeeze()
+                    s_targs = shape_targs[firsts].squeeze()
+                first_color_loss = F.cross_entropy(c_preds, c_targs)
+                first_shape_loss = F.cross_entropy(s_preds, s_targs)
                 maxes = torch.argmax(c_preds,dim=-1)
                 first_color_acc = (maxes==c_targs).float().mean()
                 maxes = torch.argmax(s_preds,dim=-1)
                 first_shape_acc = (maxes==s_targs).float().mean()
+        else:
+            first_color_loss = torch.zeros(1)
+            first_shape_loss = torch.zeros(1)
+            first_color_acc = torch.zeros(1)
+            first_shape_acc = torch.zeros(1)
     else:
         color_loss = torch.zeros(1).cuda()
         shape_loss = torch.zeros(1).cuda()
         color_acc = torch.zeros(1)
         shape_acc = torch.zeros(1)
-        first_color_loss = torch.zeros(1).cuda()
-        first_shape_loss = torch.zeros(1).cuda()
+        first_color_loss = torch.zeros(1)
+        first_shape_loss = torch.zeros(1)
         first_color_acc = torch.zeros(1)
         first_shape_acc = torch.zeros(1)
+
     if len(rew_preds) > 0:
         idxs = d_idxs
         if post_rew_preds:
@@ -864,6 +893,8 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
                     r_targs = rew_targs[firsts]
                 first_rew_loss = F.mse_loss(r_preds.squeeze().cuda(),
                                       r_targs.squeeze().cuda())
+        else:
+            first_rew_loss = torch.zeros(1)
     else:
         rew_loss = torch.zeros(1).cuda()
         first_rew_loss = torch.zeros(1).cuda()
@@ -872,7 +903,7 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
             first_loc_loss,first_color_loss,first_shape_loss,\
             first_rew_loss,first_color_acc,first_shape_acc
 
-def bptt(hyps, model, obsrs, hs, dones, obj_targs, counts):
+def bptt(hyps, model, obsrs, hs, dones, color_targs, shape_targs, count_idxs):
     """
     Used to include dependencies over time. It is assumed each rollout
     is of fixed length.
@@ -886,9 +917,11 @@ def bptt(hyps, model, obsrs, hs, dones, obj_targs, counts):
         Recurrent states at timestep t
     dones: torch LongTensor (R*N,)
         Binary array denoting the indices at the end of an episode
-    obj_targs: long tensor (R*N,2)
-        the color and shape indexes
-    counts: long tensor (R*N,1)
+    color_targs: long tensor (R*N,1)
+        the color indexes
+    shape_targs: long tensor (R*N,1)
+        the shape indexes
+    count_idxs: long tensor (R*N,1)
         the indices of the number of objects to touch
     """
     n_runs = hyps['n_runs']
@@ -901,9 +934,9 @@ def bptt(hyps, model, obsrs, hs, dones, obj_targs, counts):
     resets = 1-dones
     h_inits = model.reset_h(batch_size=n_runs)
     model.h = hs.reshape(n_runs,n_tsteps,-1)[:,0]
-    color_idxs = obj_targs[:,:1].reshape(n_runs,n_tsteps,1)
-    shape_idxs = obj_targs[:,1:].reshape(n_runs,n_tsteps,1)
-    number_idxs = counts.reshape(n_runs,n_tsteps,1)
+    color_idxs = color_targs.reshape(n_runs,n_tsteps,1)
+    shape_idxs = shape_targs.reshape(n_runs,n_tsteps,1)
+    count_idxs = count_idxs.reshape(n_runs,n_tsteps,1)
     loc_preds = []
     color_preds = []
     shape_preds = []
@@ -913,11 +946,11 @@ def bptt(hyps, model, obsrs, hs, dones, obj_targs, counts):
         obs = obsrs[:,i]
         color_idx = color_idxs[:,i]
         shape_idx = shape_idxs[:,i]
-        number_idx = number_idxs[:,i]
+        count_idx = count_idxs[:,i]
         loc_pred,color_pred,shape_pred,rew_pred = model(obs.cuda(), h,
                                                         color_idx,
                                                         shape_idx,
-                                                        number_idx)
+                                                        count_idx)
         loc_preds.append(loc_pred)
         color_preds.append(color_pred)
         shape_preds.append(shape_pred)
@@ -949,7 +982,46 @@ def bptt(hyps, model, obsrs, hs, dones, obj_targs, counts):
         rew_preds = []
     return loc_preds, color_preds, shape_preds, rew_preds
 
-def fwd_preds(hyps, fwd_model, obsrs, hs, resets, obj_targs, counts):
+def fwd_train_loop(hyps,fwd_model,fwd_optim,expr_replay):
+    """
+    This function performs a training loop to train the fwd_dynamics
+    model.
+
+    hyps: dict of hyperparameters
+    fwd_model: Module
+        must have a decode function
+    fwd_optim: Optimizer
+        for the forward model parameters
+    expr_replay: ExperienceReplay object
+        this holds all the data to be trained on
+    """
+    bsize = hyps['fwd_bsize']
+    horizon = hyps['fwd_horizon']
+    n_loops = len(expr_replay)//bsize
+    for epoch in hyps['fwd_epochs']:
+        perm = torch.randperm(len(expr_replay))
+        avg_obs_loss = 0
+        avg_state_loss = 0
+        for b in range(n_loops):
+            idxs = perm[b*bsize:(b+1)*bsize]
+            data = expr_replay.get_data(idxs, horizon=horizon)
+            tup = fwd_preds(hyps, fwd_model, data=data)
+            obs_preds,hs,mus,sigmas,mu_preds,sigma_preds = tup
+            expr_replay.update_hs(idxs, hs)
+            obs_loss,state_loss = calc_fwd_loss(obs_preds=obs_preds,
+                                                mu_truths=mus,
+                                                sigma_truths=sigmas,
+                                                mu_preds=mu_preds,
+                                                sigma_preds=sigma_preds,
+                                                data=data)
+            fwd_loss = obs_loss + state_loss
+            fwd_loss.backward()
+            fwd_optim.step()
+            fwd_optim.zero_grad()
+            avg_obs_loss += obs_loss.item()
+            avg_state_loss += state_loss.item()
+
+def fwd_preds(hyps, fwd_model, data):
     """
     Used to include dependencies over time. It is assumed each rollout
     is of fixed length.
@@ -957,72 +1029,92 @@ def fwd_preds(hyps, fwd_model, obsrs, hs, resets, obj_targs, counts):
     R = Number of runs
     N = Number of steps per run
 
-    obsrs: torch FloatTensor (R*N,C,H,W)
-        MDP states at each timestep t
-    hs: FloatTensor (R,H)
-        Recurrent states at timestep t
-    resets: torch LongTensor (R*N,)
-        Binary array denoting the indices in which a fresh h should be
-        used
-    obj_targs: long tensor (R*N,2)
-        the color and shape indexes
-    counts: long tensor (R*N,1)
-        the indices of the number of objects to touch
+    data: dict
+        obs_seq: torch FloatTensor (R*N,C,H,W)
+            MDP states at each timestep t
+        h_seq: FloatTensor (R,H)
+            Recurrent states at timestep t
+        reset_seq: torch LongTensor (R*N,)
+            Binary array denoting the indices in which a fresh h should be
+            used
+        color_seq: long tensor (R*N,)
+            the color indexes
+        shape_seq: long tensor (R*N,)
+            the shape indexes
+        count_seq: long tensor (R*N,)
+            the indices of the number of objects to touch
     """
-    n_runs = hyps['n_runs']
-    n_tsteps = hyps['n_tsteps']
-    b_size = n_runs*n_tsteps
-    # Case of validation
-    if len(obsrs) != b_size:
-        n_runs = 1
-        n_tsteps = len(obsrs)
-        b_size = n_runs*n_tsteps
+    obs_seq =   data['obs_seq']
+    h_seq =     data['h_seq']
+    reset_seq = data['reset_seq']
+    done_seq =  data['done_seq']
+    color_seq = data['color_seq']
+    shape_seq = data['shape_seq']
+    count_seq = data['count_seq']
 
-    obsrs = obsrs.reshape(n_runs,n_tsteps,*obsrs.shape[1:])
-    resets = resets.reshape(n_runs,n_tsteps,1)
-    h_inits = fwd_model.reset_h(batch_size=n_runs)
-    if hs is None: hs = fwd_model.reset_h(batch_size=n_runs)
-    fwd_model.h = hs
-    color_idxs = obj_targs[:,:1].reshape(n_runs,n_tsteps,1)
-    shape_idxs = obj_targs[:,1:].reshape(n_runs,n_tsteps,1)
-    number_idxs = counts.reshape(n_runs,n_tsteps,1)
-    preds = []
-    h = fwd_model.h
-    for i in range(n_tsteps):
+    obs_preds = []
+    h_inits = fwd_model.reset_h(batch_size=len(done_seq))
+    hs = []
+    mus = []
+    sigmas = []
+    mu_preds = []
+    sigma_preds = []
+    h = h_seq[:,0] # (B,H)
+    for i in range(obs_seq.shape[1]):
         # Might be tempting to use starts or dones here, BUT DON"T DO IT
         # The start indices are unreliable due to being used as markers
         # for the start of recording an episode, not necessarily the
         # real start of a new episode. The dones are unreliable because
         # of the way the runners reset the environment only if the done
         # does not occur on the final step of the rollout. Use the
-        # reset_fwd_hs vector
+        # resets vector
         if resets[:,i].sum() > 0:
             new_hs = []
             for j in range(len(resets)):
                 new_h = h[j] if resets[j,i] < 1 else h_inits[j].data
                 new_hs.append(new_h)
             h = torch.stack(new_hs)
-        obs = obsrs[:,i]
-        color_idx = color_idxs[:,i]
-        shape_idx = shape_idxs[:,i]
-        number_idx = number_idxs[:,i]
-        pred = fwd_model(obs.cuda(), h, color_idx=color_idx,
-                                 shape_idx=shape_idx,
-                                 number_idx=number_idx)
-        preds.append(pred)
-        h = fwd_model.h
-    shape = (b_size, *pred.shape[1:])
-    preds = torch.stack(preds,dim=1).reshape(shape)
-    return preds, h.data
+        hs.append(h)
+        h,mu,sigma,mu_pred,sigma_pred = fwd_model(obs_preds[:,i].cuda(),
+                                      h=h,
+                                      color_idx=color_seq[:,i].cuda(),
+                                      shape_idx=shape_seq[:,i].cuda(),
+                                      count_idx=count_seq[:,i].cuda())
+        mus.append(mu)
+        sigmas.append(sigma)
+        mu_preds.append(mu_pred)
+        sigma_preds.append(sigma_pred)
+        s = sample_s(mu,sigma)
+        obs_pred = fwd_model.decode(s)
+        obs_preds.append(obs_pred)
+    obs_preds = torch.stack(obs_preds,dim=1)
+    hs = torch.stack(hs,dim=1)
+    mus = torch.stack(mus,dim=1)
+    sigmas = torch.stack(sigmas,dim=1)
+    mu_preds = torch.stack(mu_preds,dim=1)
+    sigma_preds = torch.stack(sigma_preds,dim=1)
+    return obs_preds, hs, mus, sigmas, mu_preds, sigma_preds
 
-def calc_fwd_loss(preds, obsrs, starts, dones):
+def calc_fwd_loss(obs_preds, mu_truths, sigma_truths, mu_preds,
+                                                      sigma_preds,
+                                                      data):
     """
     A function to calculate the fwd dynamics loss
     
-    preds: torch Float Variable (B,C,H,W)
-    obsrs: torch FloatTensor (B,C,H,W)
-    starts: torch LongTensor (B,)
-    dones: torch LongTensor (B,)
+    obs_preds: torch Float Tensor (B,S,C,H,W)
+        decoded observation predictions
+    mu_truths: torch Float Tensor (B,S,E)
+    sigma_truths: torch Float Tensor (B,S,E)
+    mu_preds: torch Float Tensor (B,S,E)
+    sigma_preds: torch Float Tensor (B,S,E)
+    data: dict
+        "obs_seq":      torch float tensor (B,S,C,H,W)
+        "rew_seq:       torch float tensor (B,S)
+        "count_seq":    torch long tensor  (B,S)
+        "color_seq":    torch long tensor  (B,S)
+        "shape_seq":    torch long tensor  (B,S)
+        "done_seq":     torch long tensor  (B,S)
+        "reset_seq":    torch long tensor  (B,S)
     """
     idxs = (1-dones.squeeze()).bool()
     preds = preds[idxs]

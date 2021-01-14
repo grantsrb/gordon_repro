@@ -67,33 +67,39 @@ frames = []
 with torch.no_grad():
     while len(frames) < n_unique_frames:
         if done:
-            obs,_ = env.reset()
+            obs,targ = env.reset()
             model.reset_h()
             img = obs.squeeze().permute(1,2,0).data.numpy()/3
             frames.append(np.tile(img[None],(repeat,1,1,1)))
-        tup = model(obs[None].to(DEVICE))
+        if len(targ) > 4: num_idx = targ[4:5].long()[None].cuda()
+        else: num_idx = None
+        tup = model(obs[None].to(DEVICE), None,
+                    targ[2:3].long()[None].cuda(),
+                    targ[3:4].long()[None].cuda(),
+                    num_idx)
         if len(tup)==3: pred,color,shape = tup
         else: pred,color,shape,rew_p = tup
         obs,targ,rew,done,_ = env.step(pred)
-        print("pred:", pred.cpu().data.numpy())
-        print("targ:", targ)
         sum_rew += rew
         if color is not None and len(color) > 0:
             color = torch.argmax(color[0]).item()
             shape = torch.argmax(shape[0]).item()
         loc = pred.squeeze().cpu().data.tolist()
-        if len(tup) > 3 and len(rew_p) > 0: rew_p = rew_p.cpu().data.tolist()
-        else: rew_p = []
+        if len(tup) > 3 and len(rew_p) > 0:
+            rew_p = rew_p.cpu().data.tolist()
+        else:
+            rew_p = []
         disp_pred = loc + [color,shape]
-        #print("pred:", disp_pred)
-        #print("targ:", targ)
+        print("pred:", disp_pred)
+        print("targ:", targ)
+        print()
         loc_loss = F.mse_loss(pred,torch.FloatTensor(targ[:2])[None].cuda())
         #print("locL:", loc_loss.item())
         #print()
         img = obs.squeeze().permute(1,2,0).data.numpy()/3
         frames.append(np.tile(img[None],(repeat,1,1,1)))
         n_loops += 1
-        print("{:.2f}%".format(len(frames)/n_unique_frames*100), end="      \r")
+        #print("{:.2f}%".format(len(frames)/n_unique_frames*100), end="      \r")
 
 frames = np.vstack(frames)
 frames = np.uint8(frames*255/2+255/2)

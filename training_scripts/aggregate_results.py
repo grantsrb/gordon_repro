@@ -24,10 +24,14 @@ if __name__ == "__main__":
         if len(checkpts) == 0: continue
         table = mlanl.get_table(mlio.load_checkpoint(checkpts[0]))
         for checkpt_path in checkpts:
-            checkpt = mlio.load_checkpoint(checkpt_path)
-            for k in table.keys():
-                if k in set(checkpt.keys()):
-                    table[k].append(checkpt[k])
+            try:
+                checkpt = mlio.load_checkpoint(checkpt_path)
+                for k in table.keys():
+                    if k in set(checkpt.keys()):
+                        table[k].append(checkpt[k])
+            except Exception as e:
+                print("model folder:", model_folder)
+                print("chckpt:", checkpt_path)
 
         df = pd.DataFrame(table)
         # These keys are ignored

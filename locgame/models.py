@@ -64,9 +64,9 @@ class RSSM(nn.Module, CustomModule):
         return h_new, mu, sigma
     
     def extra_repr(self):
-        s = "h_size={}, s_size={}, a_size={}, n_layers={}, min_sigma={}"
+        s = "h_size={}, s_size={}, a_size={}, min_sigma={}"
         return s.format(self.h_size, self.s_size, self.a_size,
-                                self.n_layers, self.min_sigma)
+                                                  self.min_sigma)
 
 
 class LocatorBase(TransformerBase, CustomModule):
@@ -327,6 +327,7 @@ class CNNBase(nn.Module, CustomModule):
                                             emb_size=512,
                                             attn_size=64,
                                             n_heads=6,
+                                            feat_bnorm=True,
                                             **kwargs):
         """
         img_shape: tuple of ints (chan, height, width)
@@ -341,6 +342,8 @@ class CNNBase(nn.Module, CustomModule):
             attention mechanism
         n_heads: int
             the number of attention heads in the multi-head attention
+        bnorm: bool
+            
         """
         super().__init__()
         self.img_shape = img_shape
@@ -348,6 +351,7 @@ class CNNBase(nn.Module, CustomModule):
         self.emb_size = emb_size
         self.attn_size = attn_size
         self.n_heads = n_heads
+        self.bnorm = feat_bnorm
 
     def get_conv_block(self, in_chan, out_chan, ksize=3, 
                                           stride=1,
@@ -423,7 +427,7 @@ class SimpleCNN(CNNBase):
                                     ksize=ksize,
                                     stride=stride,
                                     padding=padding,
-                                    bnorm=True,
+                                    bnorm=self.bnorm,
                                     act_fxn=self.act_fxn,
                                     drop_p=0)
         self.conv_blocks.append(nn.Sequential(*block))
@@ -444,7 +448,7 @@ class SimpleCNN(CNNBase):
                                         ksize=ksize,
                                         stride=stride,
                                         padding=padding,
-                                        bnorm=True,
+                                        bnorm=self.bnorm,
                                         act_fxn=self.act_fxn,
                                         drop_p=0)
             self.conv_blocks.append(nn.Sequential(*block))
@@ -500,7 +504,7 @@ class MediumCNN(CNNBase):
                                     ksize=ksize,
                                     stride=stride,
                                     padding=padding,
-                                    bnorm=True,
+                                    bnorm=self.bnorm,
                                     act_fxn=self.act_fxn,
                                     drop_p=0)
         self.conv_blocks.append(nn.Sequential(*block))
@@ -523,7 +527,7 @@ class MediumCNN(CNNBase):
                                         ksize=ksize,
                                         stride=stride,
                                         padding=padding,
-                                        bnorm=True,
+                                        bnorm=self.bnorm,
                                         act_fxn=self.act_fxn,
                                         drop_p=0)
             self.conv_blocks.append(nn.Sequential(*block))
@@ -560,6 +564,7 @@ class RNNFwdDynamics(LocatorBase):
                                                    cnn_type="SimpleCNN",
                                                    aud_targs=False,
                                                    fixed_h=False,
+                                                   deconv_emb_size=None,
                                                    **kwargs):
         """
         cnn_type: str
@@ -580,6 +585,9 @@ class RNNFwdDynamics(LocatorBase):
             if true, the h value is reset at each step in the episode
         """
         super().__init__(**kwargs)
+        if deconv_emb_size is not None:
+            self.emb_size = deconv_emb_size
+            kwargs['emb_size'] = self.emb_size
         self.cnn_type = cnn_type
         self.deconv_type = deconv_type
         self.rnn_type = rnn_type
@@ -635,6 +643,7 @@ class RNNFwdDynamics(LocatorBase):
                                  sigma=None):
         """
         x: torch float tensor (B,C,H,W)
+            must be None if mu and sigma are not None
         h: optional float tensor (B,E)
         color_idx: long tensor (B,1)
         shape_idx: long tensor (B,1)
@@ -656,7 +665,8 @@ class RNNFwdDynamics(LocatorBase):
         if x is not None:
             feats = self.cnn(x)
             feats = self.pos_encoder(feats)
-            feat = self.extractor(h.unsqueeze(1), feats).mean(1)
+            feat = self.extractor(h.unsqueeze(1), feats)
+            feat = feat.mean(1)
             mu, sigma = self.encoder(h,feat)
 
         count_emb = self.count_embs(count_idx)
@@ -683,7 +693,7 @@ class MuSig(nn.Module, CustomModule):
     """
     A simple class to assist in creating state vectors for the rssm
     """
-    def __init__(self, h_size, feat_size, s_size):
+    def __init__(self, h_size, feat_size, s_size, min_sigma=0.0001):
         """
         h_size: int
             size of h_vector
@@ -694,8 +704,9 @@ class MuSig(nn.Module, CustomModule):
         """
         super().__init__()
         self.h_size = h_size
+        self.min_sigma = min_sigma
         self.feat_size = feat_size
-        self.projection = nn.Linear(self.h_size + self.feat_size, s_size)
+        self.projection=nn.Linear(self.h_size+self.feat_size,2*s_size)
 
     def forward(self, h, feat):
         """
@@ -776,39 +787,67 @@ class SimpleDeconv(nn.Module):
     This model is used to make observation predictions. It takes in
     a single state vector and transforms it to an image (C,H,W)
     """
-    def __init__(self, emb_size, img_shape, start_shape=(512,7,7),
-                                            deconv_bnorm=False,
+    def __init__(self, emb_size, img_shape, deconv_start_shape=(512,7,7),
+                                            deconv_ksizes=None,
+                                            deconv_strides=None,
+                                            deconv_lnorm=True,
+                                            fwd_bnorm=False,
                                             drop_p=0,
+                                            end_sigmoid=False,
                                             **kwargs):
         """
-        start_shape - list like [channel1, height1, width1]
+        deconv_start_shape - list like [channel1, height1, width1]
             the initial shape to reshape the embedding inputs
+        deconv_ksizes - list like of ints
+            the kernel size for each layer
+        deconv_stides - list like of ints
+            the strides for each layer
         img_shape - list like [channel2, height2, width2]
             the final shape of the decoded tensor
         emb_size - int
             size of belief vector h
-        deconv_bnorm: bool
+        deconv_lnorm: bool
+            determines if layer norms will be used at each layer
+        fwd_bnorm: bool
             determines if batchnorm will be used
         drop_p - float
             dropout probability at each layer
+        end_sigmoid: bool
+            if true, the final activation is a sigmoid. Otherwise
+            there is no final activation
         """
         super().__init__()
-        self.start_shape = start_shape
+        self.start_shape = deconv_start_shape
         self.img_shape = img_shape
         self.emb_size = emb_size
         self.drop_p = drop_p
-        self.bnorm = deconv_bnorm
+        self.bnorm = fwd_bnorm
+        self.end_sigmoid = end_sigmoid
+        self.strides = deconv_strides
+        self.ksizes = deconv_ksizes
+        self.lnorm = deconv_lnorm
         print("deconv using bnorm:", self.bnorm)
 
-        flat_start = int(np.prod(start_shape))
-        modules = [
-                   nn.LayerNorm(emb_size),
-                   nn.Linear(emb_size, flat_start),
-                   Reshape((-1, *start_shape))
-                   ]
-        depth, height, width = start_shape
-        first_ksize = 9
-        first_stride = 2
+        if self.ksizes is None:
+            self.ksizes = [9,5,5,4,4,4,4,4,4,4]
+        if self.strides is None:
+            if self.start_shape[-1] == 7:
+                self.strides = [2,1,1,1,2,2,2,1,1]
+            else:
+                self.strides = [2,1,1,1,2,2,1,1,1]
+
+        flat_start = int(np.prod(deconv_start_shape))
+        modules = []
+        if self.lnorm:
+            modules.append(nn.LayerNorm(emb_size))
+        modules.append(nn.Linear(emb_size, flat_start))
+        if self.bnorm:
+            modules.append(nn.BatchNorm1d(flat_start))
+        modules.append(Reshape((-1, *deconv_start_shape)))
+
+        depth, height, width = deconv_start_shape
+        first_ksize = self.ksizes[0]
+        first_stride = self.strides[0]
         self.sizes = []
         deconv = deconv_block(depth, depth, ksize=first_ksize,
                                             stride=first_stride,
@@ -819,39 +858,45 @@ class SimpleDeconv(nn.Module):
                                                     stride=first_stride,
                                                     op="deconv")
         print("Img shape:", self.img_shape)
-        print("Start Shape:", start_shape)
+        print("Start Shape:", deconv_start_shape)
         print("h:", height, "| w:", width)
         self.sizes.append((height, width))
         modules.append(deconv)
 
-        ksizes = [5,5,4,4,4,4,4,4,4]
         padding = 0
-        strides = [1,1,1,2,2,2,1,1]
-        i = -1
+        i = 0
         while height < self.img_shape[-2] and width < self.img_shape[-1]:
             i+=1
-            ksize = ksizes[i]
-            stride = strides[i]
-            modules.append(nn.LayerNorm((depth,height,width)))
-            modules.append(deconv_block(depth, max(depth // 2, 16),
-                                        ksize=ksize, padding=padding,
-                                        stride=stride, bnorm=self.bnorm,
-                                        drop_p=drop_p))
-            depth = max(depth // 2, 16)
+            ksize =  self.ksizes[i]
+            stride = self.strides[i]
+            if self.lnorm:
+                modules.append(nn.LayerNorm((depth,height,width)))
             height, width = update_shape((height,width), kernel=ksize,
                                                          stride=stride,
                                                          padding=padding,
                                                          op="deconv")
+            if height==self.img_shape[-2] and width==self.img_shape[-1]:
+                end_depth = self.img_shape[-3]
+            else:
+                end_depth = max(depth // 2, 16)
+            modules.append(deconv_block(depth, end_depth,
+                                        ksize=ksize, padding=padding,
+                                        stride=stride, bnorm=self.bnorm,
+                                        drop_p=drop_p))
+            depth = end_depth
             self.sizes.append((height, width))
             print("h:", height, "| w:", width, "| d:", depth)
         
+        # TODO: implement CutOut method
         diff = height-self.img_shape[-2]
-        k = diff + 1
-        modules.append(nn.Conv2d(depth, self.img_shape[0], k))
-        height, width = update_shape((height,width), kernel=k)
+        if diff > 0:
+            k = diff + 1
+            modules.append(nn.Conv2d(depth, self.img_shape[0], k))
+            height, width = update_shape((height,width), kernel=k)
+            self.sizes.append((height, width))
+        if self.end_sigmoid: 
+            modules.append(nn.Sigmoid())
         print("decoder:", height, width)
-        self.sizes.append((height, width))
-        
         self.sequential = nn.Sequential(*modules)
 
     def forward(self, x):
@@ -960,3 +1005,33 @@ class Reshape(nn.Module):
     def extra_repr(self):
         return "shape={}".format(self.shape)
 
+class Cutout(nn.Module):
+    """
+    Takes the center of a pixel grid with the specified size
+    """
+    def __init__(self, cut_height, cut_width=None):
+        """
+        cut_height: int
+            the height of the cutout
+        cut_width: int or None
+            the width of the cutout. if None, defaults to height
+        dims: tuple of ints
+            the dimension of the height and width respectively
+        """
+        self.cut_height = cut_height
+        self.cut_width = cut_width
+        if cut_width is None:
+            self.cut_width = self.cut_height
+
+    def forward(self, x):
+        """
+        x: torch Tensor (...,H,W)
+            must have the height and width as the final dimensions
+        """
+        if x.shape[-2]>self.cut_height:
+            half_diff = (x.shape[-2]-self.cut_height)//2
+            x = x[...,half_diff:half_diff+self.cut_height,:]
+        if x.shape[-1]>self.cut_width:
+            half_diff = (x.shape[-1]-self.cut_width)//2
+            x = x[...,half_diff:half_diff+self.cut_width]
+        return x

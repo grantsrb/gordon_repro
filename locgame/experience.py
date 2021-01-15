@@ -16,21 +16,17 @@ class ExperienceReplay:
     h values after each update. Otherwise stale hs can infect the
     training.
     """
-    def __init__(self, intl_data=None, max_size=20000, n_runs=16,
-                                                       n_tsteps=32):
+    def __init__(self, intl_data=None, max_size=20000):
         """
-        max_size: int
-            the maximum number of time steps to store
-        n_runs: int
-            the number of 
+        max_size: int or None
+            the maximum number of time steps to store. if None, no max
+            is imposed
         """
-        self.n_runs = n_runs
-        self.n_tsteps = n_tsteps
-        self.max_size = max_size//self.n_runs
+        self.max_size = max_size if max_size is not None else np.inf
         self.data = {
             "obsrs":     None,
             "rews":      None,
-            "hs":        None,
+            "fwd_hs":    None,
             "count_idxs":None,
             "longs":     None,
             #"color_idxs": idx 0
@@ -39,9 +35,10 @@ class ExperienceReplay:
             #"dones":      idx 3
             #"resets":     idx 4
         }
+        self.data_lists = {k:[] for k in self.data.keys()}
         # Fill main dict with with intl_data
         if intl_data is not None:
-            self.add_new_data(intl_data)
+            self.add_data(intl_data)
 
     def add_data(self, new_data):
         """
@@ -50,11 +47,11 @@ class ExperienceReplay:
 
             new_data: dict
                 keys:
-                    "obsrs":      torch float tensor (R*T, C,H,W)
-                    "rews":       torch float tensor (R*T,)
-                    "hs":         torch float tensor (R*T, E)
-                    "count_idxs": torch long tensor (R*T,)
-                    "longs":      torch long tensor (R*T,6)
+                    "obsrs":      torch float tensor (B,C,H,W)
+                    "rews":       torch float tensor (B,)
+                    "fwd_hs":         torch float tensor (B,E)
+                    "count_idxs": torch long tensor  (B,)
+                    "longs":      torch long tensor  (B,5)
                         #"color_idxs": idx 0
                         #"shape_idxs": idx 1
                         #"starts":     idx 2
@@ -63,20 +60,25 @@ class ExperienceReplay:
         """
         # Append new data
         for k in self.data.keys():
-            end_shape = [-1]
-            if len(new_data[k].shape) > 1:
-                end_shape = new_data[k].shape[1:]
-            new_data[k] = new_data[k].reshape(self.n_runs,
-                                              self.n_tsteps,
-                                              *end_shape)
-            new_data[k] = new_data[k].cpu().data.squeeze().numpy()
-            if self.data[k] is not None:
-                arr = [self.data[k],new_data[k]]
-                self.data[k] = np.concatenate(arr, axis=1)
-            else:
-                self.data[k] = new_data[k]
-            if len(self.data[k]) > self.max_len:
-                self.data[k] = self.data[k]
+            new_data[k] = new_data[k].cpu().detach().data.squeeze()
+            self.data_lists[k].append(new_data[k].clone())
+
+    def cat_new_data(self):
+        """
+        This function must be called before using the data dict. It
+        performs the concatenation of all new data with the old data
+        and imposes the max size limit
+        """
+        for k in self.data.keys():
+            if len(self.data_lists[k]) > 0:
+                if self.data[k] is None:
+                    self.data[k] = torch.cat(self.data_lists[k],dim=0)
+                else:
+                    arr = [self.data[k],*self.data_lists[k]]
+                    self.data[k] = torch.cat(arr, dim=0)
+                if len(self.data[k])>self.max_size:
+                    self.data[k] = self.data[k][-self.max_size:]
+                self.data_lists[k] = []
 
     def get_data(self, idxs, horizon=9):
         """
@@ -89,30 +91,44 @@ class ExperienceReplay:
             the datapoint at that index in the data arrays 
         horizon: int
             the length of the data sequences
-        """
-        idxs = idxs.cpu().data.numpy()
-        sample = dict()
-        obs_seq = rolling_window(self.data['obsrs'], horizon+1)[idxs]
-        sample['obs_seq'] = torch.FloatTensor(obs_seq)
-        rew_seq = rolling_window(self.data['rews'], horizon+1)[idxs]
-        sample['rew_seq'] = torch.FloatTensor(rew_seq)
-        h_seq = rolling_window(self.data['hs'], horizon+1)[idxs]
-        sample['h_seq'] = torch.FloatTensor(h_seq)
-        count_seq = rolling_window(self.data['count_idxs'],
-                                   horizon+1)[idxs]
-        sample['count_seq'] = torch.LongTensor(count_seq)
 
+        S = horizon
+        B = len(idxs)
+        Returns:
+            dict
+                "obs_seq": float tensor (B,S,C,H,W)
+                "rew_seq": float tensor (B,S)
+                "h_seq": float tensor   (B,S,E)
+                "done_seq":  long tensor (B,S)
+                "start_seq": long tensor (B,S)
+                "reset_seq": long tensor (B,S)
+                "color_seq": long tensor (B,S)
+                "shape_seq": long tensor (B,S)
+                "count_seq": long tensor (B,S)
+        """
+        self.cat_new_data()
+        sample = dict()
+        sample['obs_seq'] = rolling_window(self.data['obsrs'],
+                                           horizon)[idxs].clone()
+        sample['rew_seq'] = rolling_window(self.data['rews'],
+                                           horizon)[idxs].clone()
+        sample['h_seq'] = rolling_window(self.data['fwd_hs'],
+                                           horizon)[idxs].clone()
+        sample['count_seq'] = rolling_window(self.data['count_idxs'],
+                                            horizon)[idxs].long().clone()
         #"color_idxs": idx 0
         #"shape_idxs": idx 1
         #"starts":     idx 2
         #"dones":      idx 3
         #"resets":     idx 4
-        long_seq = rolling_window(self.data['longs'],horizon+1)[idxs]
-        long_seq = torch.LongTensor(long_seq)
+        long_seq = rolling_window(self.data['longs'],
+                                  horizon)[idxs].long().clone()
         sample['color_seq'] = long_seq[:,:,0]
         sample['shape_seq'] = long_seq[:,:,1]
-        sample['done_seq'] = long_seq[:,:,3]
+        sample['start_seq'] = long_seq[:,:,2]
+        sample['done_seq'] =  long_seq[:,:,3]
         sample['reset_seq'] = long_seq[:,:,4]
+        sample = {k:v.contiguous() for k,v in sample.items()}
         return sample # shapes (B,S,...)
 
     def update_hs(self, idxs, new_hs):
@@ -127,28 +143,32 @@ class ExperienceReplay:
             for each idx
         """
         horizon = new_hs.shape[1]
-        idxs = idxs.cpu().data.numpy()
-        new_hs = new_hs.cpu().data.numpy()
+        new_hs = new_hs.cpu().data
         for i in range(len(new_hs)):
-            self.data[hs][idxs[i]:idxs[i]+horizon] = new_hs[i]
+            self.data["fwd_hs"][idxs[i]:idxs[i]+horizon] = new_hs[i]
 
     def __len__(self):
-        if self.data['dones'] is None:
-            return 0
-        return len(self.data['dones'])
+        list_len = 0
+        if self.data_lists['obsrs'] is not None:
+            list_len=np.sum([len(l) for l in self.data_lists['obsrs']])
+            list_len = int(list_len)
+        data_len = 0
+        if self.data['obsrs'] is not None:
+            data_len = len(self.data['obsrs'])
+        return min(list_len + data_len, self.max_size)
 
     def load(self, save_name):
         with open(save_name, 'rb') as f:
             data = pickle.load(f)
-        self.add_new_data(data)
+        self.add_data(data)
 
     def save(self, save_name):
         with open(save_name, 'wb') as f:
             pickle.dump(self.data, f)
 
-def rolling_window(array, window, time_axis=0):
+def rolling_window(array, window, axis=0, stride=1):
     """
-    Make an ndarray with a rolling window of the last dimension.
+    Make an ndarray with a rolling window of the last dimension
 
     Taken from deepretina package (https://github.com/baccuslab/deep-retina/)
 
@@ -160,8 +180,9 @@ def rolling_window(array, window, time_axis=0):
     window : int
         Size of rolling window
 
-    time_axis : int, optional
-        The axis of the temporal dimension, either 0 or -1 (Default: 0)
+    axis : int, optional
+        The axis of the temporal dimension, either 0 or -1
+        (Default: 0)
 
     Returns
     -------
@@ -181,29 +202,37 @@ def rolling_window(array, window, time_axis=0):
     array([[ 1.,  2.,  3.],
            [ 6.,  7.,  8.]])
     """
-    if time_axis == 0:
-        if type(array) == type(np.array([])):
-            array = array.T
-        elif len(array.shape) >= 2:
-            l = list([i for i in range(len(array.shape))])
-            array = array.transpose(*reversed(l))
+    if isinstance(array, torch.Tensor):
+        assert axis==0, "time axis must be 0 for torch tensors"
+        arr = array.unfold(axis, window, stride)
+        arange = torch.arange(len(arr.shape))
+        if len(arange) > 2:
+            return arr.permute(0,arange[-1],*arange[1:-1])
+        return arr
 
-    elif time_axis == -1:
+    if stride != 1:
+        s = "strides other than 1 are not implemented for ndarrays"
+        raise NotImplemented(s)
+    if axis == 0:
+        array = array.T
+
+    elif axis == -1:
         pass
 
     else:
-        raise ValueError('Time axis must be 0 (first dimension) or -1 (last)')
+        raise ValueError('Time axis must be 0 (first dimension) or -1\
+                                                              (last)')
 
     assert window >= 1, "`window` must be at least 1."
-    assert window <= array.shape[-1], "`window` is too long."
+    assert window < array.shape[-1], "`window` is too long."
 
     # with strides
-    shape = array.shape[:-1] + (array.shape[-1] - (window-1), window)
+    shape = array.shape[:-1] + (array.shape[-1] - window, window)
     strides = array.strides + (array.strides[-1],)
-    arr = np.lib.stride_tricks.as_strided(array, shape=shape, strides=strides)
+    arr = np.lib.stride_tricks.as_strided(array, shape=shape,
+                                             strides=strides)
 
-    if time_axis == 0:
+    if axis == 0:
         return np.rollaxis(arr.T, 1, 0)
     else:
         return arr
-

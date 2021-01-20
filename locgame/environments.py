@@ -264,6 +264,12 @@ def center_zero2one(obs):
         return obs[None]
     return obs
 
+def null_prep(obs):
+    obs = obs.astype(np.float32)
+    if len(obs.shape)==2:
+        return obs[None]
+    return obs
+
 def get_env(hyps):
     if hyps['env_name'][:4] == "gym:":
         og_name = hyps['env_name']

@@ -33,7 +33,7 @@ print("Params:", params)
 torch.manual_seed(seed)
 np.random.seed(seed)
 
-game_path = os.path.expanduser("~/loc_games/LocationGame2dLinux_2/LocationGame2dLinux.x86_64")
+game_path = os.path.expanduser("/data2/pdplab/grantsrb/loc_games/LocationGame2dLinux_5/LocationGame2dLinux.x86_64")
 channel = EngineConfigurationChannel()
 env_channel = EnvironmentParametersChannel()
 env = UnityEnvironment(file_name=game_path,
@@ -56,11 +56,12 @@ while True:
     # The obs is a list of length 2 in which the first element is the image and the second is the goal coordinate
     # Reward in this case is the difference between the action location and the nearest object to the action location
     obs, rew, done, _ = env.step([x,z])
+    plt.imsave("sample.png", obs[0])
     print("targ:", obs[1])
     print("rew:", rew)
     print("done:", done)
     #plt.imshow(obs[0])
-    plt.show()
+    #plt.show()
     if done:
         obs = env.reset()
         print("resetting")

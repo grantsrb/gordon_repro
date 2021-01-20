@@ -381,7 +381,8 @@ def train(rank, hyps, verbose=True):
         plt.imsave("imgs/sample"+str(epoch)+".png", obs)
 
         # Fwd dynamics loss
-        train_fwd_loss,train_fwd_obs_loss,train_fwd_state_loss = 0,0,0
+        train_fwd_loss,train_obs_loss,train_state_loss = 0,0,0
+        train_state_pred_loss,train_over_loss = 0,0
         if fwd_dynamics:
             print("Calculating Fwd Loss")
             model.cpu()
@@ -391,11 +392,16 @@ def train(rank, hyps, verbose=True):
                                                   exp_replay,
                                                   verbose=True)
             model.cuda()
-            train_fwd_obs_loss,train_fwd_state_loss,obs_preds = tup
-            train_fwd_loss = train_fwd_obs_loss + train_fwd_state_loss
+            train_obs_loss,train_state_loss = tup[:2]
+            train_state_pred_loss,train_over_loss,obs_preds = tup[2:5]
+            train_fwd_loss = train_obs_loss + train_state_loss
+            train_fwd_loss += train_state_pred_loss
             s = "Train- FwdObs: {:.5f} | FwdState: {:.5f}\n"
-            stats_string += s.format(train_fwd_obs_loss,
-                                     train_fwd_state_loss)
+            stats_string += s.format(train_obs_loss,
+                                     train_state_loss)
+            s = "Train- FwdPred:{:.5f} | FwdOver:{:.5f}\n"
+            stats_string += s.format(train_state_pred_loss,
+                                     train_over_loss)
 
             # Sample images
             obs_preds = obs_preds.reshape(-1,*obs_preds.shape[-3:])
@@ -423,6 +429,8 @@ def train(rank, hyps, verbose=True):
             first_val_loc_loss,first_val_color_loss = loss_tup[8:10]
             first_val_shape_loss,first_val_rew_loss = loss_tup[10:12]
             first_val_color_acc,first_val_shape_acc = loss_tup[12:14]
+            val_obs_loss,val_state_loss = loss_tup[14:16]
+            val_state_pred_loss,val_over_loss = loss_tup[16:18]
 
             val_obj_loss = ((val_color_loss + val_shape_loss)/2)
             val_obj_acc = ((val_color_acc + val_shape_acc)/2)
@@ -459,8 +467,10 @@ def train(rank, hyps, verbose=True):
             "train_shape_acc": train_shape_acc,
             "train_obj_acc":train_obj_acc,
             "train_fwd_loss":train_fwd_loss,
-            "train_fwd_obs_loss":train_fwd_obs_loss,
-            "train_fwd_state_loss":train_fwd_state_loss,
+            "train_obs_loss":train_obs_loss,
+            "train_state_loss":train_state_loss,
+            "train_state_pred_loss":train_state_pred_loss,
+            "train_over_loss":train_over_loss,
 
             "first_train_loc_loss":   first_train_loc_loss,
             "first_train_color_loss": first_train_color_loss,
@@ -481,6 +491,10 @@ def train(rank, hyps, verbose=True):
             "val_shape_acc": val_shape_acc,
             "val_obj_acc":val_obj_acc,
             "val_fwd_loss":val_fwd_loss,
+            "val_obs_loss":val_obs_loss,
+            "val_state_loss":val_state_loss,
+            "val_state_pred_loss":val_state_pred_loss,
+            "val_over_loss":val_over_loss,
 
             "first_val_loc_loss":   first_val_loc_loss,
             "first_val_color_loss": first_val_color_loss,
@@ -547,7 +561,7 @@ class DummyFwdModel(torch.nn.Module):
         self.h = torch.zeros(batch_size)
         return self.h
 
-    def decode(self,x):
+    def decode(self,*args,**kwargs):
         return None
 
     def forward(self,*args,**kwargs):
@@ -848,6 +862,10 @@ class Runner:
             first_color_acc,first_shape_acc = loss_tup[10:12]
 
             fwd_loss = torch.zeros(1)
+            obs_loss = torch.zeros(1)
+            state_loss = torch.zeros(1)
+            state_pred_loss = torch.zeros(1)
+            over_loss = torch.zeros(1)
             if not isinstance(self.fwd_model,DummyFwdModel):
                 # Nones are required to make batch size of 1
                 data = {"obs_seq":   obsrs[None].clone(),
@@ -863,18 +881,31 @@ class Runner:
                 obs_preds,hs,mus,sigmas,mu_preds,sigma_preds = tup
                 if try_key(hyps,'end_sigmoid',False):
                     data['obs_seq'] = data['obs_seq']/6+0.5
-                obs_loss,state_loss = calc_fwd_loss(obs_preds=obs_preds,
+                obs_loss,state_loss,state_pred_loss = calc_fwd_loss(
+                                               obs_preds=obs_preds,
                                                mu_truths=mus,
                                                sigma_truths=sigmas,
                                                mu_preds=mu_preds,
                                                sigma_preds=sigma_preds,
                                                data=data)
-                fwd_loss = obs_loss + state_loss
+                fwd_loss = obs_loss + state_loss + state_pred_loss
+                over_loss = torch.zeros(1)
+                if try_key(hyps,"overshoot",False):
+                    self.fwd_model.cuda()
+                    tup = fwd_preds(hyps,self.fwd_model,
+                                    data=data,overshoot=True)
+                    _,_,_,_,mu_preds,sigma_preds = tup
+                    self.fwd_model.cpu()
+                    over_loss = calc_overshoot_loss(mu_truths=mus,
+                                             sigma_truths=sigmas,
+                                             mu_preds=mu_preds,
+                                             sigma_preds=sigma_preds)
 
             return loc_loss,color_loss,shape_loss,rew_loss,\
                     color_acc,shape_acc,rews.mean(),fwd_loss,\
                     first_loc_loss,first_color_loss,first_shape_loss,\
-                    first_rew_loss,first_color_acc,first_shape_acc
+                    first_rew_loss,first_color_acc,first_shape_acc,\
+                    obs_loss,state_loss,state_pred_loss,over_loss
 
 def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
                 loc_targs,color_targs,shape_targs,rew_targs,
@@ -915,7 +946,7 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
     # Loc Loss
     l_preds = loc_preds[d_idxs]
     l_targs = loc_targs[s_idxs]
-    # HEADS UP: Added a multiplcation factor of 10
+    # TODO HEADS UP: Added a multiplcation factor of 10
     loc_loss = 10*F.mse_loss(l_preds.cuda(), l_targs.cuda())
     if firsts is not None:
         assert hyps is not None, "if using firsts, must argue hyps"
@@ -1110,15 +1141,20 @@ def fwd_train_loop(hyps,fwd_model,fwd_optim,exp_replay,verbose=False):
     """
     torch.cuda.empty_cache()
     fwd_model.train()
+    grad_norm = try_key(hyps,'fwd_grad_norm',None)
     horizon = hyps['fwd_horizon']
     bsize = hyps['fwd_bsize']
     n_loops = len(exp_replay)//bsize
     total_obs_loss = 0
     total_state_loss = 0
+    total_state_pred_loss = 0
+    total_over_loss = 0
     for epoch in range(hyps['fwd_epochs']):
         perm = torch.randperm(len(exp_replay)-horizon-1)
         avg_obs_loss = 0
         avg_state_loss = 0
+        avg_state_pred_loss = 0
+        avg_over_loss = 0
         iter_start = time.time()
         for b in range(n_loops):
             idxs = perm[b*bsize:(b+1)*bsize]
@@ -1128,22 +1164,41 @@ def fwd_train_loop(hyps,fwd_model,fwd_optim,exp_replay,verbose=False):
             exp_replay.update_hs(idxs, hs.data)
             if try_key(hyps,'end_sigmoid',False):
                 data['obs_seq'] = data['obs_seq']/6+0.5
-            obs_loss,state_loss = calc_fwd_loss(obs_preds=obs_preds,
+            obs_loss,state_loss,state_pred_loss = calc_fwd_loss(
+                                                obs_preds=obs_preds,
                                                 mu_truths=mus,
                                                 sigma_truths=sigmas,
                                                 mu_preds=mu_preds,
                                                 sigma_preds=sigma_preds,
                                                 data=data)
-            fwd_loss = obs_loss + state_loss
+            fwd_loss = obs_loss + state_loss + state_pred_loss
             fwd_loss.backward()
+            over_loss = torch.zeros(1)
+            if try_key(hyps,'overshoot',False):
+                tup = fwd_preds(hyps,fwd_model,data,overshoot=True)
+                _,_,_,_,mu_preds,sigma_preds = tup
+                over_loss = calc_overshoot_loss(mu_truths=mus,
+                                         sigma_truths=sigmas,
+                                         mu_preds=mu_preds,
+                                         sigma_preds=sigma_preds)
+                over_loss.backward()
+
+            if grad_norm is not None and grad_norm > 0:
+                params = fwd_optim.param_groups[0]['params']
+                nn.utils.clip_grad_norm_(params, grad_norm, norm_type=2)
             fwd_optim.step()
             fwd_optim.zero_grad()
             avg_obs_loss += obs_loss.item()
             avg_state_loss += state_loss.item()
+            avg_state_pred_loss += state_pred_loss.item()
+            avg_over_loss += over_loss.item()
             if verbose:
-                s ="Fwd Obs: {:.5f} | State: {:.5f} | {:.0f}% | t:{:.2f}"
+                s ="Obs:{:.5f} | State:{:.5f} | Pred:{:.5f} "
+                s += "| Over:{:.5f} | {:.0f}% | t:{:.2f}"
                 percent = (epoch*n_loops+b)/(hyps['fwd_epochs']*n_loops)
                 s = s.format(obs_loss.item(), state_loss.item(),
+                                       state_pred_loss.item(),
+                                       over_loss.item(),
                                        percent*100,
                                        time.time()-iter_start)
                 print(s, end=len(s)//4*" " + "\r")
@@ -1157,6 +1212,8 @@ def fwd_train_loop(hyps,fwd_model,fwd_optim,exp_replay,verbose=False):
             plt.imsave("imgs/debug.png", np.clip(temp/6+0.5,0,1))
         total_obs_loss += avg_obs_loss/n_loops
         total_state_loss += avg_state_loss/n_loops
+        total_state_pred_loss += avg_state_pred_loss/n_loops
+        total_over_loss += avg_over_loss/n_loops
     if verbose:
         s ="Fwd Obs: {:.5f} | State: {:.5f} | {:.0f}% | t:{:.2f}"
         s = s.format(avg_obs_loss, avg_state_loss,
@@ -1166,9 +1223,12 @@ def fwd_train_loop(hyps,fwd_model,fwd_optim,exp_replay,verbose=False):
         print()
     total_obs_loss = total_obs_loss/hyps['fwd_epochs']
     total_state_loss = total_state_loss/hyps['fwd_epochs']
-    return total_obs_loss, total_state_loss, obs_preds.data.cpu()
+    total_state_pred_loss = total_state_pred_loss/hyps['fwd_epochs']
+    total_over_loss = total_over_loss/hyps['fwd_epochs']
+    return total_obs_loss, total_state_loss, total_state_pred_loss,\
+                           total_over_loss,  obs_preds.data.cpu()
 
-def fwd_preds(hyps, fwd_model, data):
+def fwd_preds(hyps, fwd_model, data, overshoot=False):
     """
     Used to include dependencies over time. It is assumed each rollout
     is of fixed length.
@@ -1193,6 +1253,11 @@ def fwd_preds(hyps, fwd_model, data):
             the shape indexes
         count_seq: long tensor (B,S)
             the indices of the number of objects to touch
+    overshoot: bool
+        if true, overshot state predictions are returned as mu_truth
+        and sigma_truth. All other returns are none. Remember that
+        when overshooting, all mu and sigma predictions are shifted
+        over one in the prediction direction!!
     """
     torch.cuda.empty_cache()
     obs_seq =   data['obs_seq'].data
@@ -1204,12 +1269,15 @@ def fwd_preds(hyps, fwd_model, data):
     count_seq = data['count_seq'].data
 
     obs_preds = []
-    h_inits = fwd_model.reset_h(batch_size=len(starts))
+    fwd_model.reset_h(batch_size=len(starts))
     hs = []
     mus = []
     sigmas = []
     mu_preds = []
     sigma_preds = []
+    mu_pred = None
+    sigma_pred = None
+    resets = (resets.bool()|starts.bool()).float()
     h = h_seq[:,0].data # (B,H)
     for i in range(obs_seq.shape[1]):
         # Here we set the h vector to the stored h vector if the start
@@ -1221,37 +1289,53 @@ def fwd_preds(hyps, fwd_model, data):
         # rollouts, but this is the best we can do. Setting the max
         # experience replay size can help cycle data through to avoid
         # stale h vectors
-        if starts[:,i].sum() > 0 or resets[:,i].sum() > 0:
+        if resets[:,i].sum() > 0:
             new_hs = []
-            for j in range(len(starts)):
+            for j in range(len(resets)):
                 if resets[j,i] > 1:
-                    new_h = h_inits[j]
-                elif starts[j,i] > 1:
                     new_h = h_seq[j,i].data
                 else:
                     new_h = h[j]
                 new_hs.append(new_h)
             h = torch.stack(new_hs)
         hs.append(h.cpu())
-        h,mu,sigma,mu_pred,sigma_pred=fwd_model(obs_seq[:,i].cuda(),
+        if overshoot:
+            h,mu,sigma,mu_pred,sigma_pred=fwd_model(obs_seq[:,i].cuda(),
+                                      h=h.cuda(),
+                                      color_idx=color_seq[:,i].cuda(),
+                                      shape_idx=shape_seq[:,i].cuda(),
+                                      count_idx=count_seq[:,i].cuda(),
+                                      prev_mu=mu_pred,
+                                      prev_sigma=sigma_pred,
+                                      resets=resets[:,i].cuda())
+        else:
+            h,mu,sigma,mu_pred,sigma_pred=fwd_model(obs_seq[:,i].cuda(),
                                       h=h.cuda(),
                                       color_idx=color_seq[:,i].cuda(),
                                       shape_idx=shape_seq[:,i].cuda(),
                                       count_idx=count_seq[:,i].cuda())
-        mus.append(mu)
-        sigmas.append(sigma)
         mu_preds.append(mu_pred)
         sigma_preds.append(sigma_pred)
-        # Obs preds are made for same time step as the true states
-        s = models.sample_s(mu,sigma)
-        obs_pred = fwd_model.decode(s)
-        obs_preds.append(obs_pred)
-    obs_preds = torch.stack(obs_preds,dim=1)
-    hs = torch.stack(hs,dim=1)
-    mus = torch.stack(mus,dim=1)
-    sigmas = torch.stack(sigmas,dim=1)
+        if not overshoot:
+            mus.append(mu)
+            sigmas.append(sigma)
     mu_preds = torch.stack(mu_preds,dim=1)
     sigma_preds = torch.stack(sigma_preds,dim=1)
+    if not overshoot:
+        hs.append(h.cpu())
+        hs = torch.stack(hs,dim=1)
+        mus = torch.stack(mus,dim=1)
+        sigmas = torch.stack(sigmas,dim=1)
+        B,S = mus.shape[:2]
+
+        # Obs preds are made for same time step as the true states
+        mu_flat = mus.reshape(-1,mus.shape[-1])
+        sigma_flat = sigmas.reshape(-1,mus.shape[-1])
+        s = models.sample_s(mu_flat,sigma_flat)
+        h_flat = hs[:,1:].reshape(-1,hs.shape[-1])
+        obs_preds = fwd_model.decode(s,h_flat.cuda())
+        obs_preds = obs_preds.reshape(B,S,*obs_preds.shape[1:])
+        hs = hs[:,:-1]
     return obs_preds, hs, mus, sigmas, mu_preds, sigma_preds
 
 def calc_fwd_loss(obs_preds, mu_truths, sigma_truths, mu_preds,
@@ -1279,20 +1363,40 @@ def calc_fwd_loss(obs_preds, mu_truths, sigma_truths, mu_preds,
     obs_targs = data['obs_seq'].cuda()
     obs_loss = F.mse_loss(obs_preds.cuda(), obs_targs)
 
+    normal = Normal(torch.zeros_like(mu_truths),
+                    torch.ones_like(sigma_truths))
+    true_normal = Normal(mu_truths,sigma_truths)
+    state_loss  = kl_divergence(true_normal, normal).mean()
+
     # Must shift preds and truths by 1 space so that they align
     N = mu_truths.shape[0]*(mu_truths.shape[1]-1)
     mu_truths =    mu_truths[:,1:].reshape(N,-1)
     sigma_truths = sigma_truths[:,1:].reshape(N,-1)
     mu_preds =     mu_preds[:,:-1].reshape(N,-1)
     sigma_preds =  sigma_preds[:,:-1].reshape(N,-1)
-    normal = Normal(torch.zeros_like(mu_truths),
-                    torch.ones_like(sigma_truths))
-    true_normal = Normal(mu_truths,sigma_truths)
     true_normal_nograd = Normal(mu_truths.data,sigma_truths.data)
     pred_normal = Normal(mu_preds,sigma_preds)
+    state_pred_loss=kl_divergence(pred_normal,true_normal_nograd).mean()
 
-    state_loss  = kl_divergence(true_normal, normal).mean()
-    state_loss += kl_divergence(pred_normal, true_normal).mean()
+    return obs_loss, state_loss, state_pred_loss
 
-    return obs_loss, state_loss
+def calc_overshoot_loss(mu_truths, sigma_truths, mu_preds, sigma_preds):
+    """
+    A function to calculate the fwd dynamics loss
 
+    mu_truths: torch Float Tensor (B,S,E)
+    sigma_truths: torch Float Tensor (B,S,E)
+    mu_preds: torch Float Tensor (B,S,E)
+    sigma_preds: torch Float Tensor (B,S,E)
+    """
+    torch.cuda.empty_cache()
+    # Must shift preds and truths by 1 space so that they align
+    N = mu_truths.shape[0]*(mu_truths.shape[1]-1)
+    mu_truths =    mu_truths[:,1:].reshape(N,-1)
+    sigma_truths = sigma_truths[:,1:].reshape(N,-1)
+    mu_preds =     mu_preds[:,:-1].reshape(N,-1)
+    sigma_preds =  sigma_preds[:,:-1].reshape(N,-1)
+    true_normal_nograd = Normal(mu_truths.data,sigma_truths.data)
+    pred_normal = Normal(mu_preds,sigma_preds)
+    overshoot_loss=kl_divergence(pred_normal, true_normal_nograd).mean()
+    return overshoot_loss

@@ -23,6 +23,7 @@ output_name = "output.mp4"
 if len(sys.argv) > 2:
     for arg in sys.argv[2:]:
         if arg == "validate": validate = True
+        elif arg=="vae": use_fwd_preds = False
         else: output_name = arg
 
 print("Saving to", output_name)
@@ -104,14 +105,14 @@ with torch.no_grad():
 
         # Fwd Dynamics
         if fwd_dynamics:
-            _,mu,sigma,mu_pred,sigma_pred = fwd_model(obs[None].cuda(),
+            h,mu,sigma,mu_pred,sigma_pred = fwd_model(obs[None].cuda(),
                                                    h=None,
                                                    color_idx=color_idx,
                                                    shape_idx=shape_idx,
                                                    count_idx=num_idx)
             if not use_fwd_preds:
                 s = mu + sigma*torch.randn_like(sigma)
-                obs_pred = fwd_model.decode(s).cpu()
+                obs_pred = fwd_model.decode(s,h).cpu()
                 if not try_key(hyps,'end_sigmoid',False):
                     obs_pred = torch.clamp(obs_pred/6+.5,0,1)
                 temp = obs/6+.5
@@ -125,7 +126,7 @@ with torch.no_grad():
         # Fwd Dynamics Cont
         if fwd_dynamics and use_fwd_preds:
             s = mu_pred + sigma_pred*torch.randn_like(sigma_pred)
-            obs_pred = fwd_model.decode(s).cpu()
+            obs_pred = fwd_model.decode(s,h).cpu()
             if not try_key(hyps,'end_sigmoid',False):
                 obs_pred = torch.clamp(obs_pred/6+.5,0,1)
             temp = obs/6+.5

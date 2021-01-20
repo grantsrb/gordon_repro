@@ -51,7 +51,9 @@ with torch.no_grad():
                 pred,color,shape,rew_pred = model(obs[None].to(DEVICE),
                                         None,
                                         targ[2:3].long()[None].cuda(),
-                                        targ[3:].long()[None].cuda())
+                                        targ[3:4].long()[None].cuda(),
+                                        targ[4:5].long()[None].cuda())
+
                 if len(color) > 0:
                     color = torch.argmax(color[0]).item()
                     shape = torch.argmax(shape[0]).item()
@@ -59,7 +61,7 @@ with torch.no_grad():
                 disp_pred = loc + [color,shape]
                 print("ending pred:", disp_pred)
                 print("ending targ:", targ)
-                loc_loss = F.mse_loss(pred,
+                loc_loss = 10*F.mse_loss(pred,
                              torch.FloatTensor(targ[:2])[None].cuda())
                 print("ending locL:", loc_loss.item())
                 print()
@@ -72,7 +74,8 @@ with torch.no_grad():
         pred,color,shape,rew_pred = model(obs[None].to(DEVICE),
                                         None,
                                         targ[2:3].long()[None].cuda(),
-                                        targ[3:].long()[None].cuda())
+                                        targ[3:4].long()[None].cuda(),
+                                        targ[4:5].long()[None].cuda())
         obs,targ,rew,done,_ = env.step(pred)
         sum_rew += rew
         if len(color) > 0:
@@ -82,7 +85,7 @@ with torch.no_grad():
         disp_pred = loc + [color,shape]
         print("pred:", disp_pred)
         print("targ:", targ)
-        loc_loss = F.mse_loss(pred,torch.FloatTensor(targ[:2])[None].cuda())
+        loc_loss = 10*F.mse_loss(pred,torch.FloatTensor(targ[:2])[None].cuda())
         print("locL:", loc_loss.item())
         print()
         plt.imshow(obs.squeeze().permute(1,2,0).data.numpy()/6+0.5)

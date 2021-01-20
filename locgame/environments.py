@@ -53,7 +53,7 @@ class GymEnv:
             the observation returned by the environment
         """
         obs = self.prep_fxn(obs.transpose(2,0,1))
-        return [torch.FloatTensor(obs),torch.zeros(4)]
+        return [torch.from_numpy(obs),torch.zeros(4)]
 
     def reset(self):
         obs = self.env.reset()
@@ -120,6 +120,7 @@ class UnityGymEnv:
 
         self.env = self.make_unity_env(env_name,
                                        seed=self.seed,
+                                       worker_id=self.worker_id,
                                        float_params=float_params,
                                        **kwargs)
         obs,action_targ = self.reset()
@@ -160,7 +161,7 @@ class UnityGymEnv:
             if k=="validation" and v>=1:
                 print("Game in validation mode")
             env_channel.set_float_parameter(k, float(v))
-        if worker_id is None: worker_id = seed%500
+        if worker_id is None: worker_id = seed%500+1
         env_made = False
         n_loops = 0
         worker_id = 0
@@ -172,8 +173,10 @@ class UnityGymEnv:
                                    seed=seed)
                 env_made = True
             except:
-                print("Error encountered making environment, trying new worker_id")
-                worker_id = worker_id + 1 + int(np.random.random()*500)
+                s = "Error encountered making environment, "
+                s += "trying new worker_id"
+                print(s)
+                worker_id =(worker_id+1+int(np.random.random()*100))%500
                 try: env.close()
                 except: pass
                 n_loops += 1
@@ -187,11 +190,11 @@ class UnityGymEnv:
         """
         if not isinstance(obs, list):
             obs = obs.transpose(2,0,1)
-            return torch.FloatTensor(self.prep_fxn(obs))
+            return torch.from_numpy(self.prep_fxn(obs))
         prepped_obs = self.prep_fxn(obs[0].transpose(2,0,1))
         # Handles the additional observations passed by the env
         prepped_obs = [prepped_obs, *obs[1:]]
-        prepped_obs = [torch.FloatTensor(x) for x in prepped_obs]
+        prepped_obs = [torch.from_numpy(x) for x in prepped_obs]
         return prepped_obs
 
     def reset(self):

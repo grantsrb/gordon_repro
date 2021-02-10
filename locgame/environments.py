@@ -152,6 +152,7 @@ class UnityGymEnv:
             must specify a unique worker id for each unity process
             on this machine
         """
+        seed = int(seed)
         if float_params is None: float_params = dict()
         path = os.path.expanduser(env_name)
         channel = EngineConfigurationChannel()
@@ -164,19 +165,18 @@ class UnityGymEnv:
         if worker_id is None: worker_id = seed%500+1
         env_made = False
         n_loops = 0
-        worker_id = 0
         while not env_made and n_loops < 50:
             try:
                 env = UnityEnvironment(file_name=path,
                                    side_channels=[channel,env_channel],
-                                   worker_id=worker_id,
-                                   seed=seed)
+                                   worker_id=int(worker_id),
+                                   seed=int(seed))
                 env_made = True
             except:
                 s = "Error encountered making environment, "
                 s += "trying new worker_id"
                 print(s)
-                worker_id =(worker_id+1+int(np.random.random()*100))%500
+                worker_id =int(worker_id+1+np.random.random()*100)%500
                 try: env.close()
                 except: pass
                 n_loops += 1

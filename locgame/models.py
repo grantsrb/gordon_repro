@@ -161,6 +161,8 @@ class RNNLocator(LocatorBase):
                                              aud_targs=False,
                                              fixed_h=False,
                                              countOut=0,
+                                             visibleCount=0,
+                                             pre_rnn=False,
                                              **kwargs):
         """
         cnn_type: str
@@ -177,14 +179,21 @@ class RNNLocator(LocatorBase):
             if true, the h value is reset at each step in the episode
         countOut: bool or int
             if true, then counting out the number of objects is part of
-            the process
+            the process. Is negated by countOut
+        visibleCount: bool or int
+            if true, then negates countOut effects
+        pre_rnn: bool
+            if true, the predictions are all made prior to the rnn.
+            if false, the predictions are made after the rnn.
         """
         super().__init__(**kwargs)
         self.cnn_type = cnn_type
         self.rnn_type = rnn_type
         self.aud_targs = aud_targs
         self.fixed_h = fixed_h
-        self.count_out = countOut
+        self.count_out = countOut and not visibleCount
+        if self.count_out: print("Model is using count vector!")
+        self.pre_rnn = pre_rnn
         if self.fixed_h: print("USING FIXED H VECTOR!!")
         self.cnn = globals()[self.cnn_type](**kwargs)
         self.pos_encoder = PositionalEncoder(self.cnn.seq_len,
@@ -221,9 +230,11 @@ class RNNLocator(LocatorBase):
         self.rnn = getattr(nn,self.rnn_type)(input_size=self.emb_size,
                                              hidden_size=self.emb_size)
 
+        if self.pre_rnn: inpt_size = 2*self.emb_size
+        else: inpt_size = self.emb_size
         self.locator = nn.Sequential(
             #nn.LayerNorm(self.emb_size),
-            nn.Linear(self.emb_size, self.class_h_size),
+            nn.Linear(inpt_size, self.class_h_size),
             globals()[self.act_fxn](),
             #nn.LayerNorm(self.class_h_size),
             nn.Linear(self.class_h_size, 2),
@@ -232,7 +243,7 @@ class RNNLocator(LocatorBase):
         # Reward model
         self.pavlov = nn.Sequential(
             #nn.LayerNorm(self.emb_size),
-            nn.Linear(self.emb_size, self.class_h_size),
+            nn.Linear(inpt_size, self.class_h_size),
             globals()[self.act_fxn](),
             #nn.LayerNorm(self.class_h_size),
             nn.Linear(self.class_h_size, 1)
@@ -240,15 +251,15 @@ class RNNLocator(LocatorBase):
         # Obj recognition model
         if self.obj_recog and not self.aud_targs:
             self.color = nn.Sequential(
-                nn.LayerNorm(self.emb_size),
-                nn.Linear(self.emb_size, self.class_h_size),
+                nn.LayerNorm(inpt_size),
+                nn.Linear(inpt_size, self.class_h_size),
                 globals()[self.act_fxn](),
                 nn.LayerNorm(self.class_h_size),
                 nn.Linear(self.class_h_size, self.n_colors)
             )
             self.shape = nn.Sequential(
-                nn.LayerNorm(self.emb_size),
-                nn.Linear(self.emb_size, self.class_h_size),
+                nn.LayerNorm(inpt_size),
+                nn.Linear(inpt_size, self.class_h_size),
                 globals()[self.act_fxn](),
                 nn.LayerNorm(self.class_h_size),
                 nn.Linear(self.class_h_size, self.n_shapes)
@@ -289,16 +300,21 @@ class RNNLocator(LocatorBase):
             h = self.aud_projection(h)
         feats = self.cnn(x)
         feats = self.pos_encoder(feats)
-        feat = self.extractor(h.unsqueeze(1), feats)
-        h = self.rnn(feat.mean(1),h)
-        loc = self.locator(h)
+        feat = self.extractor(h.unsqueeze(1), feats).mean(1)
+        if self.pre_rnn:
+            pred_inpt = torch.cat([feat,h],dim=-1)
+            h = self.rnn(feat,h)
+        else:
+            h = self.rnn(feat,h)
+            pred_inpt = h
+        loc = self.locator(pred_inpt)
         if self.obj_recog and not self.aud_targs:
-            color = self.color(h)
-            shape = self.shape(h)
+            color = self.color(pred_inpt)
+            shape = self.shape(pred_inpt)
         else:
             color,shape = [],[]
         if self.rew_recog:
-            rew = self.pavlov(h)
+            rew = self.pavlov(pred_inpt)
         else:
             rew = []
         self.h = h
@@ -816,6 +832,7 @@ class SimpleDeconv(nn.Module):
                                             deconv_attn_layers=3,
                                             deconv_attn_size=64,
                                             deconv_heads=8,
+                                            deconv_multi_init=False,
                                             **kwargs):
         """
         deconv_start_shape - list like [channel1, height1, width1]
@@ -848,6 +865,9 @@ class SimpleDeconv(nn.Module):
         deconv_heads: int
             the number of projection spaces in the multi-headed attn
             layer
+        deconv_multi_init: bool
+            if true, the init vector for the attention module will be
+            trained uniquely for each position
         """
         super().__init__()
         self.start_shape = deconv_start_shape
@@ -863,6 +883,7 @@ class SimpleDeconv(nn.Module):
         self.dec_layers = deconv_attn_layers
         self.attn_size = deconv_attn_size
         self.n_heads = deconv_heads
+        self.multi_init = deconv_multi_init
         print("deconv using bnorm:", self.bnorm)
 
         if self.ksizes is None:
@@ -884,7 +905,8 @@ class SimpleDeconv(nn.Module):
             decoder = Decoder(l, self.emb_size, self.attn_size,
                                              self.dec_layers,
                                              n_heads=self.n_heads,
-                                             init_decs=True)
+                                             init_decs=True,
+                                             multi_init=self.multi_init)
             modules.append(DeconvAttn(decoder=decoder))
         else:
             flat_start = int(np.prod(deconv_start_shape))
@@ -977,6 +999,7 @@ class UpSampledDeconv(nn.Module):
                                             deconv_attn_layers=3,
                                             deconv_attn_size=64,
                                             deconv_heads=8,
+                                            deconv_multi_init=False,
                                             **kwargs):
         """
         deconv_start_shape - list like [channel1, height1, width1]
@@ -1011,6 +1034,9 @@ class UpSampledDeconv(nn.Module):
         deconv_heads: int
             the number of projection spaces in the multi-headed attn
             layer
+        deconv_multi_init: bool
+            if true, the init vector for the attention module will be
+            trained uniquely for each position
         """
         super().__init__()
         if deconv_start_shape[0] is None: 
@@ -1029,6 +1055,7 @@ class UpSampledDeconv(nn.Module):
         self.dec_layers = deconv_attn_layers
         self.attn_size = deconv_attn_size
         self.n_heads = deconv_heads
+        self.multi_init = deconv_multi_init
         print("deconv using bnorm:", self.bnorm)
 
         if self.ksizes is None:
@@ -1050,7 +1077,8 @@ class UpSampledDeconv(nn.Module):
             decoder = Decoder(l, self.start_shape[-3], self.attn_size,
                                              self.dec_layers,
                                              n_heads=self.n_heads,
-                                             init_decs=True)
+                                             init_decs=True,
+                                             multi_init=self.multi_init)
             modules.append(DeconvAttn(decoder=decoder))
         else:
             flat_start = int(np.prod(deconv_start_shape))
@@ -1103,8 +1131,6 @@ class UpSampledDeconv(nn.Module):
             for r in range(self.n_resblocks):
                 modules.append(ResBlock(depth=depth,ksize=3,
                                                     bnorm=False))
-                if self.bnorm:
-                    modules.append(nn.BatchNorm2d(depth))
             modules.append(nn.Conv2d(depth,self.img_shape[-3],1))
         else:
             modules.append(nn.Conv2d(depth,self.img_shape[-3],3,

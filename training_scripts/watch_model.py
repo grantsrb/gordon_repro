@@ -1,6 +1,7 @@
 import ml_utils.save_io as io
 import locgame.models as models
 import locgame.environments as environments
+from locgame.training import DummyFwdModel
 import time
 from ml_utils.utils import load_json, try_key
 import sys
@@ -38,6 +39,16 @@ model = getattr(models,hyps['model_class'])(**hyps)
 model.to(DEVICE)
 model.load_state_dict(checkpt["state_dict"])
 
+fwd_dynamics = try_key(hyps,'use_fwd_dynamics',False) and\
+               try_key(hyps,"countOut",False)
+if fwd_dynamics:
+    fwd_model = getattr(models,hyps['fwd_class'])(**hyps)
+    fwd_model.cuda()
+    fwd_model.load_state_dict(checkpt['fwd_state_dict'])
+    fwd_model.eval()
+else:
+    fwd_model = DummyFwdModel()
+
 done = True
 obs = None
 model.eval()
@@ -67,6 +78,7 @@ with torch.no_grad():
                 print()
             obs,targ = env.reset()
             model.reset_h()
+            fwd_model.reset_h()
             plt.imshow(obs.squeeze().permute(1,2,0).data.numpy()/6+0.5)
             plt.show()
             if n_loops > 0:
@@ -76,6 +88,23 @@ with torch.no_grad():
                                         targ[2:3].long()[None].cuda(),
                                         targ[3:4].long()[None].cuda(),
                                         targ[4:5].long()[None].cuda())
+        # Fwd Dynamics
+        if fwd_dynamics:
+            _,mu,sigma,mu_pred,sigma_pred = fwd_model(obs[None].cuda(),
+                                        None,
+                                        targ[2:3].long()[None].cuda(),
+                                        targ[3:4].long()[None].cuda(),
+                                        targ[4:5].long()[None].cuda())
+            if not use_fwd_preds:
+                s = mu + sigma*torch.randn_like(sigma)
+                obs_pred = fwd_model.decode(s).cpu()
+                if not try_key(hyps,'end_sigmoid',False):
+                    obs_pred = torch.clamp(obs_pred/6+.5,0,1)
+                temp = obs/6+.5
+                obscatpred = torch.cat([temp,obs_pred[0]],dim=2)
+                obscatpred = obscatpred.permute(1,2,0).data.numpy()
+                obscatpreds.append(np.tile(obscatpred[None],(repeat,1,1,1)))
+
         obs,targ,rew,done,_ = env.step(pred)
         sum_rew += rew
         if len(color) > 0:
@@ -91,3 +120,4 @@ with torch.no_grad():
         plt.imshow(obs.squeeze().permute(1,2,0).data.numpy()/6+0.5)
         plt.show()
         n_loops += 1
+

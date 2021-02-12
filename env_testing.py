@@ -33,7 +33,7 @@ print("Params:", params)
 torch.manual_seed(seed)
 np.random.seed(seed)
 
-game_path = os.path.expanduser("/data2/pdplab/grantsrb/loc_games/LocationGame2dLinux_5/LocationGame2dLinux.x86_64")
+game_path = os.path.expanduser("/data4/pdp/grantsrb/loc_games/LocationGame2dLinux_9/LocationGame2dLinux.x86_64")
 channel = EngineConfigurationChannel()
 env_channel = EnvironmentParametersChannel()
 env = UnityEnvironment(file_name=game_path,

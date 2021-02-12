@@ -163,6 +163,7 @@ class RNNLocator(LocatorBase):
                                              countOut=0,
                                              visibleCount=0,
                                              pre_rnn=False,
+                                             proj_dropp=0,
                                              **kwargs):
         """
         cnn_type: str
@@ -185,6 +186,11 @@ class RNNLocator(LocatorBase):
         pre_rnn: bool
             if true, the predictions are all made prior to the rnn.
             if false, the predictions are made after the rnn.
+        proj_dropp: float
+            the dropout probability for the projection from convolutoinal
+            features to the single feature vector. This is the
+            transformer dropout probability in this model. But will
+            be the projection layer in concat and pooled models.
         """
         super().__init__(**kwargs)
         self.cnn_type = cnn_type
@@ -194,6 +200,7 @@ class RNNLocator(LocatorBase):
         self.count_out = countOut and not visibleCount
         if self.count_out: print("Model is using count vector!")
         self.pre_rnn = pre_rnn
+        self.proj_dropp = proj_dropp
         if self.fixed_h: print("USING FIXED H VECTOR!!")
         self.cnn = globals()[self.cnn_type](**kwargs)
         self.pos_encoder = PositionalEncoder(self.cnn.seq_len,
@@ -207,7 +214,8 @@ class RNNLocator(LocatorBase):
                                  init_decs=False,
                                  gen_decs=False,
                                  prob_embs=self.prob_embs,
-                                 prob_attn=self.prob_attn)
+                                 prob_attn=self.prob_attn,
+                                 drop_p=self.proj_dropp)
 
         # Learned initialization for rnn hidden vector
         self.h_shape = (1,self.emb_size)
@@ -326,7 +334,8 @@ class PooledRNNLocator(RNNLocator):
         self.pos_encoder = NullOp()
         self.extractor = Pooler(self.cnn.shapes[-1],
                                 emb_size=self.emb_size,
-                                ksize=5)
+                                ksize=5,
+                                drop_p=self.proj_dropp)
         print("Using PooledRNNLocator")
 
 class ConcatRNNLocator(RNNLocator):
@@ -335,7 +344,8 @@ class ConcatRNNLocator(RNNLocator):
         self.pos_encoder = NullOp()
         self.extractor = Concatenater(self.cnn.shapes[-1],
                                       emb_size=self.emb_size,
-                                      ksize=5)
+                                      ksize=5,
+                                      drop_p=self.proj_dropp)
         print("Using ConcatRNNLocator")
 
 class CNNBase(nn.Module, CustomModule):
@@ -344,6 +354,8 @@ class CNNBase(nn.Module, CustomModule):
                                             attn_size=64,
                                             n_heads=6,
                                             feat_bnorm=True,
+                                            conv_dropp=0,
+                                            extra_conv=False,
                                             **kwargs):
         """
         img_shape: tuple of ints (chan, height, width)
@@ -359,7 +371,11 @@ class CNNBase(nn.Module, CustomModule):
         n_heads: int
             the number of attention heads in the multi-head attention
         bnorm: bool
-            
+        conv_dropp: float
+            the dropout probability for the convolutional layers
+        extra_conv: bool
+            if true, an extra convolutional layer is added to further
+            reduce the spatial resolution of the features
         """
         super().__init__()
         self.img_shape = img_shape
@@ -368,6 +384,7 @@ class CNNBase(nn.Module, CustomModule):
         self.attn_size = attn_size
         self.n_heads = n_heads
         self.bnorm = feat_bnorm
+        self.conv_dropp = conv_dropp
 
     def get_conv_block(self, in_chan, out_chan, ksize=3, 
                                           stride=1,
@@ -445,7 +462,7 @@ class SimpleCNN(CNNBase):
                                     padding=padding,
                                     bnorm=self.bnorm,
                                     act_fxn=self.act_fxn,
-                                    drop_p=0)
+                                    drop_p=self.conv_dropp)
         self.conv_blocks.append(nn.Sequential(*block))
         shape = update_shape(shape, kernel=ksize, stride=stride,
                                                   padding=padding)
@@ -466,7 +483,7 @@ class SimpleCNN(CNNBase):
                                         padding=padding,
                                         bnorm=self.bnorm,
                                         act_fxn=self.act_fxn,
-                                        drop_p=0)
+                                        drop_p=self.conv_dropp)
             self.conv_blocks.append(nn.Sequential(*block))
             shape = update_shape(shape, kernel=ksize, stride=stride,
                                                       padding=padding)
@@ -478,6 +495,21 @@ class SimpleCNN(CNNBase):
                                                attn_size=self.attn_size,
                                                act_fxn=self.act_fxn)
                 self.itmd_attns.append(attn)
+        if self.extra_conv:
+            block = self.get_conv_block(in_chan=self.emb_size,
+                                        out_chan=self.emb_size,
+                                        ksize=5,
+                                        stride=1,
+                                        padding=0,
+                                        bnorm=False,
+                                        act_fxn="ReLU",
+                                        drop_p=0)
+            self.conv_blocks.append(nn.Sequential(*block))
+            shape = update_shape(shape, kernel=5, stride=1,
+                                                  padding=0)
+            self.shapes.append(shape)
+            print("model shape {}: {}".format(i,shape))
+            
         self.seq_len = shape[0]*shape[1]
 
     def forward(self, x, *args, **kwargs):
@@ -522,7 +554,7 @@ class MediumCNN(CNNBase):
                                     padding=padding,
                                     bnorm=self.bnorm,
                                     act_fxn=self.act_fxn,
-                                    drop_p=0)
+                                    drop_p=self.conv_dropp)
         self.conv_blocks.append(nn.Sequential(*block))
         shape = update_shape(shape, kernel=ksize, stride=stride,
                                                   padding=padding)
@@ -545,7 +577,7 @@ class MediumCNN(CNNBase):
                                         padding=padding,
                                         bnorm=self.bnorm,
                                         act_fxn=self.act_fxn,
-                                        drop_p=0)
+                                        drop_p=self.conv_dropp)
             self.conv_blocks.append(nn.Sequential(*block))
             shape = update_shape(shape, kernel=ksize, stride=stride,
                                                       padding=padding)
@@ -557,6 +589,20 @@ class MediumCNN(CNNBase):
                                                attn_size=self.attn_size,
                                                act_fxn=self.act_fxn)
                 self.itmd_attns.append(attn)
+        if self.extra_conv:
+            block = self.get_conv_block(in_chan=self.emb_size,
+                                        out_chan=self.emb_size,
+                                        ksize=5,
+                                        stride=1,
+                                        padding=0,
+                                        bnorm=False,
+                                        act_fxn="ReLU",
+                                        drop_p=0)
+            self.conv_blocks.append(nn.Sequential(*block))
+            shape = update_shape(shape, kernel=5, stride=1,
+                                                  padding=0)
+            self.shapes.append(shape)
+            print("model shape {}: {}".format(i,shape))
         self.seq_len = shape[0]*shape[1]
 
     def forward(self, x, *args, **kwargs):
@@ -1196,19 +1242,24 @@ class Pooler(nn.Module):
     A simple class to act as a dummy extractor that actually performs
     a final convolution followed by a global average pooling
     """
-    def __init__(self, shape, emb_size=512, ksize=5):
+    def __init__(self, shape, emb_size=512, ksize=5, drop_p=0):
         """
         shape: tuple of ints (H,W)
         emb_size: int
         ksize: int
+        drop_p: float
         """
         super().__init__()
         self.emb_size = emb_size
         self.ksize = ksize
         self.shape = shape
-        self.conv = nn.Conv2d(self.emb_size, self.emb_size, self.ksize)
-        self.activ = nn.ReLU()
-        self.layer = nn.Sequential( self.conv, self.activ)
+        self.drop_p = drop_p
+
+        block = [nn.Conv2d(self.emb_size, self.emb_size, self.ksize)]
+        if self.drop_p > 0:
+            block.append(nn.Dropout(self.drop_p))
+        block.append(nn.ReLU())
+        self.layer = nn.Sequential(*block)
 
     def forward(self, h, x):
         """
@@ -1227,31 +1278,35 @@ class Concatenater(nn.Module):
     a another convolution followed by a feature concatenation and 
     nonlinear projection to a single feature vector.
     """
-    def __init__(self, shape, emb_size=512, ksize=5, h_size=1000):
+    def __init__(self, shape, emb_size=512, ksize=5, h_size=1000,
+                                                     drop_p=0):
         """
         shape: tuple of ints (H,W)
         emb_size: int
         ksize: int
+        drop_p: float
         """
         super().__init__()
         self.emb_size = emb_size
         self.ksize = ksize
         self.shape = shape
+        self.x_shape = (self.emb_size, *self.shape)
         self.h_size = h_size
-        self.conv = nn.Conv2d(self.emb_size, self.emb_size, self.ksize)
-        self.activ = nn.ReLU()
-        self.layer = nn.Sequential( self.conv, self.activ)
+        self.drop_p = drop_p
+
+        block = [nn.Conv2d(self.emb_size, self.emb_size, self.ksize)]
+        block.append(nn.ReLU())
+        self.layer = nn.Sequential(*block)
         new_shape = update_shape(self.shape, kernel=ksize,
                                              stride=1,
                                              padding=0)
         flat_size = new_shape[-2]*new_shape[-1]*self.emb_size
-        self.collapser = nn.Sequential(
-                    nn.Linear(flat_size,self.h_size),
-                    nn.ReLU(),
-                    nn.Linear(self.h_size, self.emb_size)
-                    )
-        self.x_shape = (len(x), self.emb_size, self.shape[0],
-                                               self.shape[1])
+        block = [nn.Linear(flat_size,self.h_size)]
+        if self.drop_p > 0:
+            block.append(nn.Dropout(self.drop_p))
+        block.append(nn.ReLU())
+        block.append(nn.Linear(self.h_size, self.emb_size))
+        self.collapser = nn.Sequential(*block)
 
 
     def forward(self, h, x):
@@ -1260,7 +1315,8 @@ class Concatenater(nn.Module):
         x: torch FloatTensor (B,S,E)
             the features from the cnn
         """
-        x = x.permute(0,2,1).reshape(self.x_shape)
+        x_shape = (len(x), *self.x_shape)
+        x = x.permute(0,2,1).reshape(x_shape)
         fx = self.layer(x).reshape(len(x), -1)
         fx = self.collapser(fx)
         return fx.reshape(len(x),1,self.emb_size) # (B,1,E)

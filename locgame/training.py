@@ -233,6 +233,15 @@ def train(rank, hyps, verbose=True):
         first_avg_rew_loss = 0
         first_avg_obj_acc = 0
 
+        last_avg_loc_loss = 0
+        last_avg_obj_loss = 0
+        last_avg_color_loss = 0
+        last_avg_color_acc = 0
+        last_avg_shape_loss = 0
+        last_avg_shape_acc = 0
+        last_avg_rew_loss = 0
+        last_avg_obj_acc = 0
+
         model.train()
         print("Training...")
         torch.cuda.empty_cache()
@@ -298,12 +307,17 @@ def train(rank, hyps, verbose=True):
             first_loc_loss,first_color_loss=loss_tup[6:8]
             first_shape_loss, first_rew_loss = loss_tup[8:10]
             first_color_acc,first_shape_acc = loss_tup[10:12]
+            last_loc_loss,last_color_loss=loss_tup[12:14]
+            last_shape_loss, last_rew_loss = loss_tup[14:16]
+            last_color_acc,last_shape_acc = loss_tup[16:18]
 
             loss = rew_alpha*loc_loss + (1-rew_alpha)*rew_loss
             obj_loss = (color_loss + shape_loss)/2
             obj_acc = ((color_acc + shape_acc)/2)
             first_obj_loss = (first_color_loss + first_shape_loss)/2
             first_obj_acc = ((first_color_acc +  first_shape_acc)/2)
+            last_obj_loss = (last_color_loss + last_shape_loss)/2
+            last_obj_acc = ((last_color_acc +  last_shape_acc)/2)
             loss = alpha*loss + (1-alpha)*obj_loss
 
             back_loss = loss / hyps['n_loss_loops']
@@ -337,6 +351,14 @@ def train(rank, hyps, verbose=True):
             first_avg_color_acc += first_color_acc.item()
             first_avg_shape_acc += first_shape_acc.item()
             first_avg_obj_acc   += first_obj_acc.item()
+            last_avg_loc_loss  += last_loc_loss.item()
+            last_avg_obj_loss  += last_obj_loss.item()
+            last_avg_color_loss+= last_color_loss.item()
+            last_avg_shape_loss+= last_shape_loss.item()
+            last_avg_rew_loss  += last_rew_loss.item()
+            last_avg_color_acc += last_color_acc.item()
+            last_avg_shape_acc += last_shape_acc.item()
+            last_avg_obj_acc   += last_obj_acc.item()
 
             if rollout % hyps['n_loss_loops'] == 0:
                 optimizer.step()
@@ -368,6 +390,15 @@ def train(rank, hyps, verbose=True):
         first_train_color_acc =first_avg_color_acc / hyps['n_rollouts']
         first_train_shape_acc =first_avg_shape_acc / hyps['n_rollouts']
         first_train_obj_acc =  first_avg_obj_acc / hyps['n_rollouts']
+
+        last_train_loc_loss = last_avg_loc_loss / hyps['n_rollouts']
+        last_train_color_loss=last_avg_color_loss / hyps['n_rollouts']
+        last_train_shape_loss=last_avg_shape_loss / hyps['n_rollouts']
+        last_train_rew_loss = last_avg_rew_loss / hyps['n_rollouts']
+        last_train_obj_loss = last_avg_obj_loss / hyps['n_rollouts']
+        last_train_color_acc =last_avg_color_acc / hyps['n_rollouts']
+        last_train_shape_acc =last_avg_shape_acc / hyps['n_rollouts']
+        last_train_obj_acc =  last_avg_obj_acc / hyps['n_rollouts']
 
         s = "Train- Loss:{:.5f} | Loc:{:.5f} | Rew:{:.5f}\n"
         s +="Train- Obj Loss:{:.5f} | Obj Acc:{:.5f}\n"
@@ -431,6 +462,9 @@ def train(rank, hyps, verbose=True):
             first_val_color_acc,first_val_shape_acc = loss_tup[12:14]
             val_obs_loss,val_state_loss = loss_tup[14:16]
             val_state_pred_loss,val_over_loss = loss_tup[16:18]
+            last_val_loc_loss,last_val_color_loss = loss_tup[18:20]
+            last_val_shape_loss,last_val_rew_loss = loss_tup[20:22]
+            last_val_color_acc,last_val_shape_acc = loss_tup[22:24]
 
             val_obj_loss = ((val_color_loss + val_shape_loss)/2)
             val_obj_acc = ((val_color_acc + val_shape_acc)/2)
@@ -438,6 +472,10 @@ def train(rank, hyps, verbose=True):
                                    first_val_shape_loss)/2)
             first_val_obj_acc = ( (first_val_color_acc +\
                                    first_val_shape_acc)/2)
+            last_val_obj_loss = ((last_val_color_loss+\
+                                   last_val_shape_loss)/2)
+            last_val_obj_acc = ( (last_val_color_acc +\
+                                   last_val_shape_acc)/2)
             temp = rew_alpha*val_loc_loss + (1-rew_alpha)*val_rew_loss
             val_loss = alpha*temp + (1-alpha)*val_obj_loss
 
@@ -481,6 +519,15 @@ def train(rank, hyps, verbose=True):
             "first_train_shape_acc":  first_train_shape_acc,
             "first_train_obj_acc":    first_train_obj_acc,
 
+            "last_train_loc_loss":   last_train_loc_loss,
+            "last_train_color_loss": last_train_color_loss,
+            "last_train_shape_loss": last_train_shape_loss,
+            "last_train_rew_loss":   last_train_rew_loss,
+            "last_train_obj_loss":   last_train_obj_loss,
+            "last_train_color_acc":  last_train_color_acc,
+            "last_train_shape_acc":  last_train_shape_acc,
+            "last_train_obj_acc":    last_train_obj_acc,
+
             "val_loss":val_loss,
             "val_loc_loss":val_loc_loss,
             "val_color_loss": val_color_loss,
@@ -504,6 +551,15 @@ def train(rank, hyps, verbose=True):
             "first_val_color_acc":  first_val_color_acc,
             "first_val_shape_acc":  first_val_shape_acc,
             "first_val_obj_acc":    first_val_obj_acc,
+
+            "last_val_loc_loss":   last_val_loc_loss,
+            "last_val_color_loss": last_val_color_loss,
+            "last_val_shape_loss": last_val_shape_loss,
+            "last_val_rew_loss":   last_val_rew_loss,
+            "last_val_obj_loss":   last_val_obj_loss,
+            "last_val_color_acc":  last_val_color_acc,
+            "last_val_shape_acc":  last_val_shape_acc,
+            "last_val_obj_acc":    last_val_obj_acc,
 
             "train_rew":train_avg_rew,
             "val_rew":val_rew,
@@ -860,6 +916,9 @@ class Runner:
             first_loc_loss,first_color_loss = loss_tup[6:8]
             first_shape_loss, first_rew_loss = loss_tup[8:10]
             first_color_acc,first_shape_acc = loss_tup[10:12]
+            last_loc_loss,last_color_loss = loss_tup[12:14]
+            last_shape_loss, last_rew_loss = loss_tup[14:16]
+            last_color_acc,last_shape_acc = loss_tup[16:18]
 
             fwd_loss = torch.zeros(1)
             obs_loss = torch.zeros(1)
@@ -905,7 +964,9 @@ class Runner:
                     color_acc,shape_acc,rews.mean(),fwd_loss,\
                     first_loc_loss,first_color_loss,first_shape_loss,\
                     first_rew_loss,first_color_acc,first_shape_acc,\
-                    obs_loss,state_loss,state_pred_loss,over_loss
+                    obs_loss,state_loss,state_pred_loss,over_loss,\
+                    last_loc_loss,last_color_loss,last_shape_loss,\
+                    last_rew_loss,last_color_acc,last_shape_acc
 
 def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
                 loc_targs,color_targs,shape_targs,rew_targs,
@@ -958,6 +1019,9 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
             n_runs = 1
             n_tsteps = len(d_idxs)
         firsts = firsts.reshape(n_runs,n_tsteps).clone().bool()
+        lasts = firsts.clone()
+
+        # First Move Calculations
         firsts[:,-1] = 0 # don't care about ending firsts
         roll = torch.roll(firsts,shifts=1,dims=1).clone().bool()
         firsts = firsts.reshape(-1)
@@ -967,8 +1031,22 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
             l_targs = loc_targs[roll]
             first_loc_loss = 10*F.mse_loss(l_preds.cuda(),
                                            l_targs.cuda())
+        # Last Move Calculations
+        lasts[:,0] = 0 # can't look behind starting firsts
+        lastroll = torch.roll(lasts,shifts=-1,dims=1).clone().bool()
+        # don't care about starting lasts (this shouldn't happen anyway)
+        lastroll[:,0] = 0
+        lasts = torch.roll(lastroll,shifts=-1,dims=1).clone().bool()
+        lasts = lasts.reshape(-1)
+        lastroll = lastroll.reshape(-1)
+        with torch.no_grad():
+            l_preds = loc_preds[lasts]
+            l_targs = loc_targs[lastroll]
+            last_loc_loss = 10*F.mse_loss(l_preds.cuda(),
+                                          l_targs.cuda())
     else:
         first_loc_loss = torch.zeros(1).cuda()
+        last_loc_loss = torch.zeros(1).cuda()
 
     if len(color_preds) > 0:
         idxs = d_idxs
@@ -988,25 +1066,47 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
             shape_acc = (maxes==s_targs).float().mean()
         if firsts is not None:
             with torch.no_grad():
-                c_preds = color_preds[firsts].squeeze().cuda()
-                s_preds = shape_preds[firsts].squeeze().cuda()
+                # Firsts
                 if post_obj_preds:
-                    c_targs = color_targs[roll].squeeze().cuda()
-                    s_targs = shape_targs[roll].squeeze().cuda()
+                    c_preds = color_preds[roll].squeeze().cuda()
+                    s_preds = shape_preds[roll].squeeze().cuda()
                 else:
-                    c_targs = color_targs[firsts].squeeze().cuda()
-                    s_targs = shape_targs[firsts].squeeze().cuda()
+                    c_preds = color_preds[firsts].squeeze().cuda()
+                    s_preds = shape_preds[firsts].squeeze().cuda()
+                c_targs = color_targs[roll].squeeze().cuda()
+                s_targs = shape_targs[roll].squeeze().cuda()
                 first_color_loss = F.cross_entropy(c_preds, c_targs)
                 first_shape_loss = F.cross_entropy(s_preds, s_targs)
-                maxes = torch.argmax(c_preds,dim=-1)
+                maxes = torch.argmax(c_preds,dim=-1).long()
                 first_color_acc = (maxes==c_targs).float().mean()
-                maxes = torch.argmax(s_preds,dim=-1)
+                maxes = torch.argmax(s_preds,dim=-1).long()
                 first_shape_acc = (maxes==s_targs).float().mean()
+
+                # Lasts
+                # lastroll is one step ahead of lasts
+                if post_obj_preds:
+                    c_preds = color_preds[lastroll].squeeze().cuda()
+                    s_preds = shape_preds[lastroll].squeeze().cuda()
+                else:
+                    c_preds = color_preds[lasts].squeeze().cuda()
+                    s_preds = shape_preds[lasts].squeeze().cuda()
+                c_targs = color_targs[lastroll].squeeze().cuda()
+                s_targs = shape_targs[lastroll].squeeze().cuda()
+                last_color_loss = F.cross_entropy(c_preds, c_targs)
+                last_shape_loss = F.cross_entropy(s_preds, s_targs)
+                maxes = torch.argmax(c_preds,dim=-1).long()
+                last_color_acc = (maxes==c_targs).float().mean()
+                maxes = torch.argmax(s_preds,dim=-1).long()
+                last_shape_acc = (maxes==s_targs).float().mean()
         else:
             first_color_loss = torch.zeros(1)
             first_shape_loss = torch.zeros(1)
             first_color_acc = torch.zeros(1)
             first_shape_acc = torch.zeros(1)
+            last_color_loss = torch.zeros(1)
+            last_shape_loss = torch.zeros(1)
+            last_color_acc = torch.zeros(1)
+            last_shape_acc = torch.zeros(1)
     else:
         color_loss = torch.zeros(1).cuda()
         shape_loss = torch.zeros(1).cuda()
@@ -1016,6 +1116,10 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
         first_shape_loss = torch.zeros(1)
         first_color_acc = torch.zeros(1)
         first_shape_acc = torch.zeros(1)
+        last_color_loss = torch.zeros(1)
+        last_shape_loss = torch.zeros(1)
+        last_color_acc = torch.zeros(1)
+        last_shape_acc = torch.zeros(1)
 
     if len(rew_preds) > 0:
         idxs = d_idxs
@@ -1027,22 +1131,36 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
                               r_targs.squeeze().cuda())
         if firsts is not None:
             with torch.no_grad():
-                r_preds = rew_preds[firsts]
+                # Firsts
                 if post_obj_preds:
-                    r_targs = rew_targs[roll]
+                    r_preds = rew_preds[roll]
                 else:
-                    r_targs = rew_targs[firsts]
+                    r_preds = rew_preds[firsts]
+                r_targs = rew_targs[roll]
                 first_rew_loss = F.mse_loss(r_preds.squeeze().cuda(),
+                                      r_targs.squeeze().cuda())
+                # Lasts
+                if post_obj_preds:
+                    r_preds = rew_preds[lastroll]
+                else:
+                    r_preds = rew_preds[lasts]
+                r_targs = rew_targs[lastroll]
+                last_rew_loss = F.mse_loss(r_preds.squeeze().cuda(),
                                       r_targs.squeeze().cuda())
         else:
             first_rew_loss = torch.zeros(1)
+            last_rew_loss = torch.zeros(1)
     else:
         rew_loss = torch.zeros(1).cuda()
         first_rew_loss = torch.zeros(1).cuda()
+        last_rew_loss = torch.zeros(1)
 
     return loc_loss,color_loss,shape_loss,rew_loss,color_acc,shape_acc,\
             first_loc_loss,first_color_loss,first_shape_loss,\
-            first_rew_loss,first_color_acc,first_shape_acc
+            first_rew_loss,first_color_acc,first_shape_acc,\
+            last_loc_loss,last_color_loss,last_shape_loss,\
+            last_rew_loss,last_color_acc,last_shape_acc,
+
 
 def bptt(hyps, model, obsrs, hs, dones, color_idxs, shape_idxs,
                                                     count_idxs):

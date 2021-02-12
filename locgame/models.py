@@ -1237,6 +1237,7 @@ class Concatenater(nn.Module):
         self.emb_size = emb_size
         self.ksize = ksize
         self.shape = shape
+        self.x_shape = (self.emb_size, *self.shape)
         self.h_size = h_size
         self.conv = nn.Conv2d(self.emb_size, self.emb_size, self.ksize)
         self.activ = nn.ReLU()
@@ -1250,8 +1251,6 @@ class Concatenater(nn.Module):
                     nn.ReLU(),
                     nn.Linear(self.h_size, self.emb_size)
                     )
-        self.x_shape = (len(x), self.emb_size, self.shape[0],
-                                               self.shape[1])
 
 
     def forward(self, h, x):
@@ -1260,7 +1259,8 @@ class Concatenater(nn.Module):
         x: torch FloatTensor (B,S,E)
             the features from the cnn
         """
-        x = x.permute(0,2,1).reshape(self.x_shape)
+        x_shape = (len(x), *self.x_shape)
+        x = x.permute(0,2,1).reshape(x_shape)
         fx = self.layer(x).reshape(len(x), -1)
         fx = self.collapser(fx)
         return fx.reshape(len(x),1,self.emb_size) # (B,1,E)

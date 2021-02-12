@@ -5,3 +5,4 @@ psutil
 h5py
 scikit-image
 opencv-python
+tokenizers

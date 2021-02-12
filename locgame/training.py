@@ -194,6 +194,8 @@ def train(rank, hyps, verbose=True):
         print("Img Shape:", hyps['img_shape'])
         print("Num Samples Per Update:", batch_size)
     record_session(hyps,model)
+    if not os.path.exists("./imgs"):
+        os.mkdir("./imgs")
 
     if hyps['exp_name'] == "test":
         hyps['n_epochs'] = 2

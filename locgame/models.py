@@ -385,6 +385,7 @@ class CNNBase(nn.Module, CustomModule):
         self.n_heads = n_heads
         self.bnorm = feat_bnorm
         self.conv_dropp = conv_dropp
+        self.extra_conv = extra_conv
 
     def get_conv_block(self, in_chan, out_chan, ksize=3, 
                                           stride=1,

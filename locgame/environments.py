@@ -172,6 +172,7 @@ class UnityGymEnv:
                                    worker_id=int(worker_id),
                                    seed=int(seed))
                 env_made = True
+                env = UnityToGymWrapper(env, allow_multiple_obs=True)
             except:
                 s = "Error encountered making environment, "
                 s += "trying new worker_id"
@@ -180,7 +181,6 @@ class UnityGymEnv:
                 try: env.close()
                 except: pass
                 n_loops += 1
-        env = UnityToGymWrapper(env, allow_multiple_obs=True)
         return env
 
     def prep_obs(self, obs):

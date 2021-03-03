@@ -15,7 +15,7 @@ DEVICE = torch.device("cuda:0")
 
 use_fwd_preds = True
 repeat = 15 # Set this to longer to linger on images longer
-n_unique_frames = 50 # Set this to longer to get more unique game xp
+n_unique_frames = 100 # Set this to longer to get more unique game xp
 env_name = None # If none, defaults to argued model's env
 seed = None # If none, defaults to argued model's seed
 validate = False # Determine if environment should be heldout set
@@ -45,6 +45,9 @@ if env_name is not None:
     hyps['env_name'] = env_name
 if seed is not None:
     hyps['seed'] = seed
+
+print("Float Params")
+print("\n".join([k + ": " + str(v) for k,v in hyps['float_params'].items()]))
 
 print("Making Env")
 env = environments.UnityGymEnv(**hyps)

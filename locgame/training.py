@@ -571,6 +571,11 @@ def train(rank, hyps, verbose=True):
         if fwd_dynamics:
             save_dict['fwd_state_dict'] = fwd_model.state_dict()
             save_dict['fwd_optim_dict'] = fwd_optim.state_dict()
+        if epoch == int(hyps['n_epochs']//2):
+            save_name = "halfway"
+            save_name = os.path.join(hyps['save_folder'],save_name)
+            io.save_checkpt(save_dict, save_name, epoch, ext=".pt",
+                                       del_prev_sd=False, best=False)
         save_name = "checkpt"
         save_name = os.path.join(hyps['save_folder'],save_name)
         io.save_checkpt(save_dict, save_name, epoch, ext=".pt",
@@ -1003,6 +1008,9 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
         in a partially completed episode.
     """
     torch.cuda.empty_cache()
+    smooth_movement = False
+    if hyps is not None:
+        smooth_movement = hyps["float_params"]["smoothMovement"]
     d_idxs = (1-dones).bool()
     s_idxs = (1-starts).bool()
 
@@ -1011,7 +1019,7 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
     l_targs = loc_targs[s_idxs]
     # TODO HEADS UP: Added a multiplcation factor of 10
     loc_loss = 10*F.mse_loss(l_preds.cuda(), l_targs.cuda())
-    if firsts is not None:
+    if firsts is not None and not smooth_movement:
         assert hyps is not None, "if using firsts, must argue hyps"
         n_runs = hyps['n_runs']
         n_tsteps = hyps['n_tsteps']
@@ -1066,7 +1074,7 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
             color_acc = (maxes==c_targs).float().mean()
             maxes = torch.argmax(s_preds,dim=-1)
             shape_acc = (maxes==s_targs).float().mean()
-        if firsts is not None:
+        if firsts is not None and not smooth_movement:
             with torch.no_grad():
                 # Firsts
                 if post_obj_preds:
@@ -1077,12 +1085,18 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
                     s_preds = shape_preds[firsts].squeeze().cuda()
                 c_targs = color_targs[roll].squeeze().cuda()
                 s_targs = shape_targs[roll].squeeze().cuda()
-                first_color_loss = F.cross_entropy(c_preds, c_targs)
-                first_shape_loss = F.cross_entropy(s_preds, s_targs)
-                maxes = torch.argmax(c_preds,dim=-1).long()
-                first_color_acc = (maxes==c_targs).float().mean()
-                maxes = torch.argmax(s_preds,dim=-1).long()
-                first_shape_acc = (maxes==s_targs).float().mean()
+                if c_targs.nelement() > 0:
+                    first_color_loss = F.cross_entropy(c_preds, c_targs)
+                    first_shape_loss = F.cross_entropy(s_preds, s_targs)
+                    maxes = torch.argmax(c_preds,dim=-1).long()
+                    first_color_acc = (maxes==c_targs).float().mean()
+                    maxes = torch.argmax(s_preds,dim=-1).long()
+                    first_shape_acc = (maxes==s_targs).float().mean()
+                else:
+                    first_color_loss = torch.zeros(1)
+                    first_shape_loss = torch.zeros(1)
+                    first_color_acc = torch.zeros(1)
+                    first_shape_acc = torch.zeros(1)
 
                 # Lasts
                 # lastroll is one step ahead of lasts
@@ -1094,12 +1108,18 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
                     s_preds = shape_preds[lasts].squeeze().cuda()
                 c_targs = color_targs[lastroll].squeeze().cuda()
                 s_targs = shape_targs[lastroll].squeeze().cuda()
-                last_color_loss = F.cross_entropy(c_preds, c_targs)
-                last_shape_loss = F.cross_entropy(s_preds, s_targs)
-                maxes = torch.argmax(c_preds,dim=-1).long()
-                last_color_acc = (maxes==c_targs).float().mean()
-                maxes = torch.argmax(s_preds,dim=-1).long()
-                last_shape_acc = (maxes==s_targs).float().mean()
+                if c_targs.nelement() > 0:
+                    last_color_loss = F.cross_entropy(c_preds, c_targs)
+                    last_shape_loss = F.cross_entropy(s_preds, s_targs)
+                    maxes = torch.argmax(c_preds,dim=-1).long()
+                    last_color_acc = (maxes==c_targs).float().mean()
+                    maxes = torch.argmax(s_preds,dim=-1).long()
+                    last_shape_acc = (maxes==s_targs).float().mean()
+                else:
+                    last_color_loss = torch.zeros(1)
+                    last_shape_loss = torch.zeros(1)
+                    last_color_acc = torch.zeros(1)
+                    last_shape_acc = torch.zeros(1)
         else:
             first_color_loss = torch.zeros(1)
             first_shape_loss = torch.zeros(1)
@@ -1131,7 +1151,7 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
         r_targs = rew_targs[s_idxs]
         rew_loss = F.mse_loss(r_preds.squeeze().cuda(),
                               r_targs.squeeze().cuda())
-        if firsts is not None:
+        if firsts is not None and not smooth_movement:
             with torch.no_grad():
                 # Firsts
                 if post_obj_preds:
@@ -1139,16 +1159,22 @@ def calc_losses(loc_preds,color_preds,shape_preds,rew_preds,
                 else:
                     r_preds = rew_preds[firsts]
                 r_targs = rew_targs[roll]
-                first_rew_loss = F.mse_loss(r_preds.squeeze().cuda(),
+                if r_targs.nelement() > 0:
+                    first_rew_loss = F.mse_loss(r_preds.squeeze().cuda(),
                                       r_targs.squeeze().cuda())
+                else:
+                    first_rew_loss = torch.zeros(1)
                 # Lasts
                 if post_obj_preds:
                     r_preds = rew_preds[lastroll]
                 else:
                     r_preds = rew_preds[lasts]
                 r_targs = rew_targs[lastroll]
-                last_rew_loss = F.mse_loss(r_preds.squeeze().cuda(),
+                if r_targs.nelement() > 0:
+                    last_rew_loss = F.mse_loss(r_preds.squeeze().cuda(),
                                       r_targs.squeeze().cuda())
+                else:
+                    last_rew_loss = torch.zeros(1)
         else:
             first_rew_loss = torch.zeros(1)
             last_rew_loss = torch.zeros(1)

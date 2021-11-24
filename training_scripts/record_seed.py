@@ -45,6 +45,9 @@ if env_name is not None:
     hyps['env_name'] = env_name
 if seed is not None:
     hyps['seed'] = seed
+#hyps['float_params']['objectColorIdx'] = 0
+#hyps['float_params']['objectShapeIdx'] = -1
+#hyps['env_name'] = "~/loc_games/LocationGame2dLinux_11/LocationGame2dLinux.x86_64"
 
 print("Float Params")
 print("\n".join([k + ": " + str(v) for k,v in hyps['float_params'].items()]))

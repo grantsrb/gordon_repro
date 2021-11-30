@@ -7,18 +7,13 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import ReduceLROnPlateau,StepLR,MultiStepLR
 import time
 from tqdm import tqdm
-import math
-from queue import Queue
-from collections import deque
-import psutil
-import json
 import torch.multiprocessing as mp
 import ml_utils.save_io as io
-from ml_utils.training import get_exp_num, record_session, get_save_folder,get_resume_checkpt
+from ml_utils.training import get_exp_num, record_session, get_save_folder, get_resume_checkpt
 from ml_utils.utils import try_key, load_json
-import locgame.models as models
-import locgame.environments as environments
-from locgame.experience import ExperienceReplay
+import gordon_repro.models as models
+import gordon_repro.environments as environments
+from gordon_repro.experience import ExperienceReplay
 import matplotlib.pyplot as plt
 from datetime import datetime
 from torch.distributions import kl_divergence, Normal
